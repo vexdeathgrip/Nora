@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Nora CLI — wrapper around hermes with Nora setup."""
 
+import os
 import sys
 import subprocess
 
@@ -23,10 +24,11 @@ def main():
         print("Done.")
         return
 
-    # Everything else: pass through to hermes
+    # Everything else: pass through to hermes with prog name override
+    env = {**os.environ, "HERMES_PROG_NAME": "nora"}
     result = subprocess.run(
         ["hermes"] + sys.argv[1:],
-        env={**__import__("os").environ},
+        env=env,
     )
     sys.exit(result.returncode)
 
