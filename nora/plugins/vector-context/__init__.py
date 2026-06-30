@@ -13,6 +13,7 @@ the current time and can distinguish past memory from present context.
 """
 
 import hashlib
+import json
 import logging
 import os
 import re
@@ -28,6 +29,28 @@ from .meta_graph import MetaGraph, get_graph
 from .spreading import SpreadingActivation, format_context_block, _CachedEmbeddingFunction
 
 logger = logging.getLogger(__name__)
+
+# Dedicated Nora memory reconciliation logger — writes to a separate file
+# so the user can trace every step of the 4-phase pipeline independently.
+_nora_log_path = None
+try:
+    from hermes_constants import get_hermes_home
+    _nora_log_path = str(get_hermes_home() / "logs" / "nora-memory.log")
+except Exception:
+    _nora_log_path = str(Path.home() / ".hermes" / "logs" / "nora-memory.log")
+
+nora_logger = logging.getLogger("nora_memory")
+nora_logger.setLevel(logging.DEBUG)
+if not nora_logger.handlers:
+    _nora_handler = logging.FileHandler(_nora_log_path, mode="a", encoding="utf-8")
+    _nora_handler.setLevel(logging.DEBUG)
+    _nora_fmt = logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    _nora_handler.setFormatter(_nora_fmt)
+    nora_logger.addHandler(_nora_handler)
+nora_logger.info("=== Nora Memory Reconciliation Logger initialized === " + "=" * 40)
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -1113,6 +1136,1018 @@ def _on_skill_inject(
 
 
 # ---------------------------------------------------------------------------
+# Nora Memory Management Tools — stateful sticky tools
+# ---------------------------------------------------------------------------
+# State per tool, keyed by task_id so concurrent cron sessions don't collide.
+
+_analyze_state: Dict[str, Dict] = {}
+_humanize_state: Dict[str, Dict] = {}
+_dedup_state: Dict[str, Dict] = {}
+_state_lock = threading.RLock()
+
+REQUIRED_ANALYSIS_FIELDS = [
+    "topic", "summary", "learned", "useful_info",
+    "timestamp", "mood", "user_mood", "chemistry", "autonomy", "key_points",
+]
+
+
+def _today_str() -> str:
+    return datetime.now().strftime("%Y-%m-%d")
+
+
+def _load_today_sessions() -> List[Dict]:
+    """Query ChromaDB for conversation chunks from today, grouped by session_id."""
+    collection = _get_collection()
+    today = _today_str()
+    try:
+        results = collection.get(where={"$and": [{"date": today}, {"type": "turn"}]})
+    except Exception:
+        return []
+    if not results or not results.get("ids"):
+        return []
+    sessions: Dict[str, Dict] = {}
+    seen_ids: Set[str] = set()
+    for i, doc_id in enumerate(results["ids"]):
+        meta = (results.get("metadatas") or [{}])[i] or {}
+        sid = meta.get("session_id", "unknown")
+        text = (results.get("documents") or [""])[i] or ""
+        if sid not in sessions:
+            sessions[sid] = {
+                "session_id": sid,
+                "chunks": [],
+                "date": meta.get("date", today),
+                "topics": set(),
+            }
+        sessions[sid]["chunks"].append(text)
+        t = meta.get("topic", "")
+        if t:
+            sessions[sid]["topics"].add(t)
+        seen_ids.add(sid)
+    result_list = []
+    for sid, data in sessions.items():
+        data["topics"] = sorted(data["topics"]) if data["topics"] else ["general"]
+        result_list.append(data)
+    result_list.sort(key=lambda s: s["session_id"])
+    return result_list
+
+
+def _load_session_analyses(date_filter: str = "") -> List[Dict]:
+    """Load session_analysis entries from ChromaDB, optionally filtered by date."""
+    collection = _get_collection()
+    where = {"type": "session_analysis"}
+    if date_filter:
+        where = {"$and": [{"type": "session_analysis"}, {"date": date_filter}]}
+    try:
+        results = collection.get(where=where)
+    except Exception:
+        return []
+    if not results or not results.get("ids"):
+        return []
+    entries = []
+    for i, doc_id in enumerate(results["ids"]):
+        meta = (results.get("metadatas") or [{}])[i] or {}
+        doc = (results.get("documents") or [""])[i] or ""
+        entries.append({
+            "id": doc_id,
+            "document": doc,
+            "metadata": meta,
+        })
+    return entries
+
+
+def _store_session_analysis(session_id: str, analysis: Dict) -> str:
+    """Store a session analysis in ChromaDB with type=session_analysis."""
+    collection = _get_collection()
+    embed_fn = _get_storage_embed_fn()
+    today = _today_str()
+    content = json.dumps(analysis, ensure_ascii=False)
+    doc_id = hashlib.sha256(f"session_analysis:{session_id}:{today}".encode()).hexdigest()[:32]
+    meta = {
+        "type": "session_analysis",
+        "session_id": session_id,
+        "date": today,
+        "timestamp": datetime.now().isoformat(),
+        "topic": analysis.get("topic", "general"),
+        "emotion": analysis.get("mood", "neutral"),
+        "content_category": "factual",
+    }
+    nora_logger.debug("[CHROMADB] storing session_analysis id=%s meta=%s", doc_id[:12], json.dumps(meta))
+    try:
+        embedding = embed_fn([content])[0]
+        collection.upsert(
+            ids=[doc_id],
+            embeddings=[embedding],
+            documents=[content],
+            metadatas=[meta],
+        )
+        nora_logger.debug("[CHROMADB] upsert OK for %s (%d bytes)", doc_id[:12], len(content))
+    except Exception as exc:
+        nora_logger.error("[CHROMADB] upsert FAILED for %s: %s", doc_id[:12], exc)
+    nora_logger.debug("[CHROMADB] verifying write for %s...", doc_id[:12])
+    try:
+        verify = collection.get(ids=[doc_id])
+        found = len(verify.get("ids", [])) if verify else 0
+        nora_logger.debug("[CHROMADB] verify result for %s: %d docs found", doc_id[:12], found)
+    except Exception as exc:
+        nora_logger.debug("[CHROMADB] verify FAILED for %s: %s", doc_id[:12], exc)
+    return doc_id
+
+
+def _store_narrative_memory(session_id: str, analysis_id: str, narrative: str,
+                             analysis: Dict) -> int:
+    """Chunk a narrative memory and store in ChromaDB as type=narrative_memory."""
+    collection = _get_collection()
+    embed_fn = _get_storage_embed_fn()
+    today = _today_str()
+    chunks = _chunk_text(narrative)
+    if not chunks:
+        return 0
+
+    documents: List[str] = []
+    metadatas: List[Dict] = []
+    ids: List[str] = []
+    now = datetime.now()
+    content_hash = hashlib.md5(narrative.encode()).hexdigest()[:12]
+
+    for i, chunk in enumerate(chunks):
+        raw_id = f"narrative:{session_id}:{content_hash}:{i}"
+        doc_id = hashlib.sha256(raw_id.encode()).hexdigest()[:32]
+        topic = analysis.get("topic", "general")
+        mood = analysis.get("mood", "neutral")
+        tag_str = f"[{topic}] [{mood}] [narrative_memory] "
+        enriched = tag_str + chunk
+        meta = {
+            "text": chunk,
+            "enriched_text": enriched,
+            "type": "narrative_memory",
+            "content_category": "memory",
+            "session_id": session_id,
+            "source_analysis_id": analysis_id,
+            "topic": topic,
+            "date": today,
+            "timestamp": now.isoformat(),
+            "emotion": mood,
+            "word_count": len(chunk.split()),
+            "speaker": "nora",
+            "content_type": "reflection",
+        }
+        documents.append(chunk)
+        metadatas.append(meta)
+        ids.append(doc_id)
+
+    try:
+        embeddings = embed_fn(documents)
+        collection.upsert(ids=ids, embeddings=embeddings, documents=documents, metadatas=metadatas)
+    except Exception as exc:
+        logger.warning("Failed to store narrative memory: %s", exc)
+        return 0
+    return len(chunks)
+
+
+def _find_similar(collection, text: str, embed_fn, n: int = 4,
+                  extra_filter: Optional[Dict] = None) -> tuple[List[str], List[float]]:
+    """Find n similar entries in ChromaDB. Returns (ids, distances)."""
+    try:
+        embedding = embed_fn([text])[0]
+        where = extra_filter or {}
+        results = collection.query(
+            query_embeddings=[embedding],
+            n_results=n,
+            where=where,
+            include=["documents", "metadatas", "distances"],
+        )
+    except Exception:
+        return [], []
+    ids = results.get("ids", [[]])[0] or []
+    distances = results.get("distances", [[]])[0] or []
+    return ids, distances
+
+
+# ---------------------------------------------------------------------------
+# Tool 1: nora_analyze_sessions
+# ---------------------------------------------------------------------------
+
+ANALYZE_SESSION_SYSTEM_NOTE = (
+    "You are analyzing a past conversation session. "
+    "Extract the following fields from the session content below. "
+    "Be thorough — every field is required."
+)
+
+REQUIRED_FIELDS_HELP = """
+Required fields for your analysis (provide ALL):
+- topic: What the session was about (2-5 words)
+- summary: A 2-3 sentence summary of what happened
+- learned: What you learned from this session
+- useful_info: Any useful information worth remembering
+- timestamp: The date/time this session occurred
+- mood: The general mood/vibe of the session
+- user_mood: How the user seemed to feel
+- chemistry: How the interaction felt between you and the user
+- autonomy: How autonomous you were in this session
+- key_points: List of key discussion points
+"""
+
+
+def _validate_analysis(analysis: Any) -> List[str]:
+    """Validate analysis dict. Returns list of missing field names."""
+    if not isinstance(analysis, dict):
+        return ["analysis must be a JSON object"]
+    missing = []
+    for field in REQUIRED_ANALYSIS_FIELDS:
+        val = analysis.get(field)
+        if val is None or (isinstance(val, str) and not val.strip()):
+            missing.append(field)
+        elif isinstance(val, (list, tuple)) and len(val) == 0:
+            missing.append(field)
+    return missing
+
+
+def _build_session_prompt(session: Dict) -> str:
+    """Build a prompt showing the session content to analyze."""
+    chunks = session.get("chunks", [])
+    topics = session.get("topics", [])
+    sid = session.get("session_id", "unknown")[:12]
+    date = session.get("date", "unknown")
+
+    # Deduplicate and join chunks for readability
+    seen: Set[str] = set()
+    deduped = []
+    for c in chunks:
+        key = c.strip()[:100]
+        if key not in seen:
+            seen.add(key)
+            deduped.append(c.strip())
+
+    content = "\n\n".join(deduped)
+    # Truncate to 4000 chars to avoid context bloat
+    if len(content) > 4000:
+        content = content[:4000] + "\n... [session truncated]"
+
+    return (
+        f"## Session to Analyze\n"
+        f"Session ID: {sid}\n"
+        f"Date: {date}\n"
+        f"Topics: {', '.join(topics) if topics else 'general'}\n\n"
+        f"### Session Content\n{content}\n\n"
+        f"{REQUIRED_FIELDS_HELP}"
+        f"\nCall `nora_analyze_sessions` with `action='analyze'` and a JSON `analysis` "
+        f"object containing ALL fields listed above."
+    )
+
+
+def nora_analyze_sessions_handler(args: Dict, **kw) -> str:
+    """Phase 1: Walk through today's sessions and collect structured analysis."""
+    nora_logger.debug("[Phase 1] TOOL CALLED args=%s", json.dumps(args, default=str, ensure_ascii=False))
+    action = (args.get("action") or "start").strip().lower()
+    analysis = args.get("analysis")
+    task_id = kw.get("task_id", "default")
+
+    with _state_lock:
+        state = _analyze_state.get(task_id)
+    if state is None or action == "start":
+        sessions = _load_today_sessions()
+        if not sessions:
+            result = json.dumps({
+                "success": True,
+                "message": "No sessions found from today. Nothing to analyze.",
+                "complete": True,
+            })
+            nora_logger.info("[Phase 1] No sessions found from today — nothing to analyze | result=%s", result)
+            return result
+        state = {
+            "sessions": sessions,
+            "current_index": 0,
+            "completed": [],
+            "failed_attempts": {},
+        }
+        _analyze_state[task_id] = state
+        first = sessions[0]
+        session_ids = [s.get("session_id", "?")[:12] for s in sessions]
+        result = json.dumps({
+            "success": True,
+            "prompt": _build_session_prompt(first),
+            "progress": f"Session 1/{len(sessions)}",
+            "complete": False,
+            "_nora_retry": False,
+        })
+        nora_logger.info(
+            "[Phase 1] Started — %d session(s): %s | result=%.300s",
+            len(sessions), session_ids, result,
+        )
+        return result
+
+    if action == "analyze":
+        missing = _validate_analysis(analysis)
+        if missing:
+            sid = state["sessions"][state["current_index"]]["session_id"]
+            attempt = state["failed_attempts"].get(sid, 0) + 1
+            state["failed_attempts"][sid] = attempt
+            nora_logger.warning(
+                "[Phase 1] Validation failed for session %s (attempt %d): missing %s | analysis=%.500s",
+                sid[:12], attempt, missing, json.dumps(analysis, default=str, ensure_ascii=False),
+            )
+            session = state["sessions"][state["current_index"]]
+            result = json.dumps({
+                "success": False,
+                "error": f"Missing required fields: {', '.join(missing)}. "
+                         f"Provide ALL fields in your analysis JSON.",
+                "prompt": _build_session_prompt(session),
+                "complete": False,
+                "_nora_retry": True,
+            })
+            nora_logger.debug("[Phase 1] Validation fail response: %.300s", result)
+            return result
+
+        # Store the analysis
+        session = state["sessions"][state["current_index"]]
+        sid = session["session_id"]
+        analysis["session_id"] = sid
+        analysis["date"] = session.get("date", _today_str())
+        nora_logger.info("[Phase 1] Storing analysis for %s: data=%.500s", sid[:12], json.dumps(analysis, default=str, ensure_ascii=False))
+        doc_id = _store_session_analysis(sid, analysis)
+        state["completed"].append({"session_id": sid, "analysis_id": doc_id})
+        state["current_index"] += 1
+        nora_logger.info(
+            "[Phase 1] Session %s analyzed → stored as %s (%d/%d)",
+            sid[:12], doc_id[:12], state["current_index"], len(state["sessions"]),
+        )
+
+        if state["current_index"] >= len(state["sessions"]):
+            # Clean up state
+            _analyze_state.pop(task_id, None)
+            total = len(state["completed"])
+            result = json.dumps({
+                "success": True,
+                "message": f"All {total} session(s) analyzed. Proceed to Phase 1.5.",
+                "analyses_count": total,
+                "complete": True,
+            })
+            nora_logger.info("[Phase 1] COMPLETE — %d session(s) analyzed | result=%s", total, result)
+            return result
+
+        next_session = state["sessions"][state["current_index"]]
+        result = json.dumps({
+            "success": True,
+            "prompt": _build_session_prompt(next_session),
+            "progress": f"Session {state['current_index'] + 1}/{len(state['sessions'])}",
+            "complete": False,
+            "_nora_retry": False,
+        })
+        nora_logger.debug("[Phase 1] Next session response: %.300s", result)
+        return result
+
+    return json.dumps({"success": False, "error": f"Unknown action: {action}. Use 'start' or 'analyze'."})
+
+
+ANALYZE_SESSIONS_SCHEMA = {
+    "name": "nora_analyze_sessions",
+    "description": (
+        "[STICKY] Phase 1 of nightly memory reconciliation. "
+        "Walks through every conversation session from today. "
+        "Call with action='start' to begin, then action='analyze' with your analysis JSON "
+        "for each session. You MUST complete ALL sessions — there is no quit action."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["start", "analyze"],
+                "description": "'start' to begin, 'analyze' to submit analysis for current session",
+            },
+            "analysis": {
+                "type": "object",
+                "description": (
+                    "JSON object with ALL required fields: topic, summary, learned, useful_info, "
+                    "timestamp, mood, user_mood, chemistry, autonomy, key_points"
+                ),
+                "properties": {
+                    "topic": {"type": "string"},
+                    "summary": {"type": "string"},
+                    "learned": {"type": "string"},
+                    "useful_info": {"type": "string"},
+                    "timestamp": {"type": "string"},
+                    "mood": {"type": "string"},
+                    "user_mood": {"type": "string"},
+                    "chemistry": {"type": "string"},
+                    "autonomy": {"type": "string"},
+                    "key_points": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        "required": ["action"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Tool 2: nora_humanize_memories
+# ---------------------------------------------------------------------------
+
+HUMANIZE_SYSTEM_NOTE = (
+    "Turn the structured session analysis below into a natural, reflective "
+    "narrative memory. Write 2-3 paragraphs as if you're reminiscing about "
+    "the conversation. Cover ALL fields from the analysis naturally in the "
+    "prose: the topic, summary, what you learned, useful info, the mood/vibe, "
+    "the user's mood, the chemistry, your autonomy level, and the key points."
+)
+
+NARRATIVE_HELP = """
+Write a narrative reminiscence (2-3 paragraphs) that naturally covers:
+- What the session was about (topic/summary)
+- What you learned
+- Any useful information
+- The mood and vibe
+- How the user seemed
+- The chemistry between you
+- How autonomous you were
+- Key discussion points
+
+Write like you're remembering the conversation, not listing facts.
+Do NOT use bullet points or structured output.
+"""
+
+
+def _load_new_analyses(date_filter: str = "") -> List[Dict]:
+    """Load session_analysis entries not yet humanized (no corresponding narrative_memory)."""
+    collection = _get_collection()
+    where: Dict = {"type": "session_analysis"}
+    if date_filter:
+        where = {"$and": [{"type": "session_analysis"}, {"date": date_filter}]}
+    try:
+        results = collection.get(where=where)
+    except Exception as exc:
+        nora_logger.error("[CHROMADB] _load_new_analyses query FAILED: %s", exc)
+        return []
+    if not results or not results.get("ids"):
+        nora_logger.info("[CHROMADB] _load_new_analyses: no results for query=%s", json.dumps(where))
+        return []
+    nora_logger.info("[CHROMADB] _load_new_analyses: found %d raw analysis docs", len(results["ids"]))
+    nora_logger.debug("[CHROMADB] raw IDs: %s", results["ids"][:5])
+
+    # Check which analysis IDs already have narratives
+    try:
+        narratives = collection.get(where={"type": "narrative_memory"})
+        narr_sources: Set[str] = set()
+        if narratives and narratives.get("metadatas"):
+            for m in narratives["metadatas"]:
+                sid = (m or {}).get("source_analysis_id", "")
+                if sid:
+                    narr_sources.add(sid)
+        nora_logger.debug("[CHROMADB] narrative_memory count=%d, already-humanized sources=%s",
+                          len(narratives.get("ids", []) if narratives else []),
+                          list(narr_sources)[:5])
+    except Exception as exc:
+        nora_logger.debug("[CHROMADB] narrative_memory query failed: %s", exc)
+        narr_sources = set()
+
+    entries = []
+    for i, doc_id in enumerate(results["ids"]):
+        if doc_id in narr_sources:
+            nora_logger.debug("[CHROMADB] skipping %s — already has narrative", doc_id[:12])
+            continue
+        meta = (results.get("metadatas") or [{}])[i] or {}
+        doc = (results.get("documents") or [""])[i] or ""
+        try:
+            analysis_data = json.loads(doc)
+        except (json.JSONDecodeError, TypeError) as jde:
+            nora_logger.warning("[CHROMADB] JSON parse failed for %s: %s", doc_id[:12], jde)
+            analysis_data = {}
+        entries.append({
+            "id": doc_id,
+            "analysis": analysis_data,
+            "metadata": meta,
+        })
+    nora_logger.info("[CHROMADB] _load_new_analyses: returning %d entries after filtering", len(entries))
+    return entries
+
+
+def _build_humanize_prompt(entry: Dict) -> str:
+    """Build a prompt showing the session analysis to humanize."""
+    analysis = entry.get("analysis", {})
+    sid = analysis.get("session_id", "unknown")[:12]
+    date = analysis.get("date", "unknown")
+    topic = analysis.get("topic", "unknown")
+    summary = analysis.get("summary", "")
+
+    fields_display = "\n".join(
+        f"- {k}: {v}" for k, v in analysis.items()
+        if k not in ("session_id", "date") and v
+    )
+
+    return (
+        f"## Session Analysis to Humanize\n"
+        f"Session: {sid}\n"
+        f"Date: {date}\n"
+        f"Topic: {topic}\n"
+        f"Summary: {summary}\n\n"
+        f"### All Fields\n{fields_display}\n\n"
+        f"{NARRATIVE_HELP}"
+        f"\nCall `nora_humanize_memories` with `action='humanize'` and the `narrative` string."
+    )
+
+
+def _validate_narrative_coverage(narrative: str, analysis: Dict) -> List[str]:
+    """Check that the narrative mentions all required fields. Returns missing topics."""
+    lower = narrative.lower()
+    missing = []
+    required_mentions = {
+        "topic": analysis.get("topic", "").lower().split()[:3],
+        "learned": ["learn", "discover", "realiz", "understand", "figured out"],
+        "mood": [analysis.get("mood", "").lower()],
+        "user_mood": [analysis.get("user_mood", "").lower()],
+        "chemistry": ["chemistry", "connection", "flow", "click", "sync", "vibe"],
+    }
+    for field, keywords in required_mentions.items():
+        if not any(k in lower for k in keywords if k):
+            missing.append(field)
+    return missing
+
+
+def nora_humanize_memories_handler(args: Dict, **kw) -> str:
+    """Phase 1.5: Convert structured session analyses into narrative memories."""
+    nora_logger.debug("[Phase 1.5] TOOL CALLED args=%s", json.dumps(args, default=str, ensure_ascii=False))
+    action = (args.get("action") or "start").strip().lower()
+    narrative = args.get("narrative", "")
+    task_id = kw.get("task_id", "default")
+
+    state = _humanize_state.get(task_id)
+    if state is None or action == "start":
+        analyses = _load_new_analyses(date_filter=_today_str())
+        if not analyses:
+            result = json.dumps({
+                "success": True,
+                "message": "No session analyses to humanize. Run Phase 1 first.",
+                "complete": True,
+            })
+            nora_logger.info("[Phase 1.5] No session analyses found — nothing to humanize | result=%s", result)
+            return result
+        state = {
+            "analyses": analyses,
+            "current_index": 0,
+            "completed": [],
+        }
+        _humanize_state[task_id] = state
+        first = analyses[0]
+        nora_logger.info(
+            "[Phase 1.5] Started — %d analysis(es) to humanize. First: %s",
+            len(analyses), first.get("analysis", {}).get("session_id", "?")[:12],
+        )
+        result = json.dumps({
+            "success": True,
+            "prompt": _build_humanize_prompt(first),
+            "progress": f"Memory {1}/{len(analyses)}",
+            "complete": False,
+            "_nora_retry": False,
+        })
+        nora_logger.debug("[Phase 1.5] Start response: %.300s", result)
+        return result
+
+    if action == "humanize":
+        if not narrative or not narrative.strip():
+            entry = state["analyses"][state["current_index"]]
+            nora_logger.warning(
+                "[Phase 1.5] Empty narrative submitted for %s — retrying",
+                entry.get("analysis", {}).get("session_id", "?")[:12],
+            )
+            result = json.dumps({
+                "success": False,
+                "error": "Narrative is required. Write 2-3 paragraphs covering all fields.",
+                "prompt": _build_humanize_prompt(entry),
+                "complete": False,
+                "_nora_retry": True,
+            })
+            nora_logger.debug("[Phase 1.5] Empty narrative response: %.300s", result)
+            return result
+
+        entry = state["analyses"][state["current_index"]]
+        analysis = entry.get("analysis", {})
+        sid = analysis.get("session_id", "unknown")
+        missing = _validate_narrative_coverage(narrative, analysis)
+        if missing:
+            nora_logger.warning(
+                "[Phase 1.5] Narrative for %s missing coverage: %s — retrying\nnarrative=%.500s",
+                sid[:12], missing, narrative[:500],
+            )
+            result = json.dumps({
+                "success": False,
+                "error": f"Your narrative doesn't cover: {', '.join(missing)}. "
+                         f"Mention these aspects naturally in your prose.",
+                "prompt": _build_humanize_prompt(entry),
+                "complete": False,
+                "_nora_retry": True,
+            })
+            return result
+
+        # Store the narrative memory
+        nora_logger.info("[Phase 1.5] Storing narrative for %s: narrative=%.500s analysis_id=%s",
+                         sid[:12], narrative[:500], entry["id"][:12])
+        count = _store_narrative_memory(sid, entry["id"], narrative.strip(), analysis)
+        state["completed"].append({"analysis_id": entry["id"], "chunks": count})
+        state["current_index"] += 1
+        nora_logger.info(
+            "[Phase 1.5] Session %s humanized → %d chunks (%d/%d)",
+            sid[:12], count, state["current_index"], len(state["analyses"]),
+        )
+
+        if state["current_index"] >= len(state["analyses"]):
+            _humanize_state.pop(task_id, None)
+            total = len(state["completed"])
+            result = json.dumps({
+                "success": True,
+                "message": f"All {total} analysis(es) humanized. Proceed to Phase 2.",
+                "memories_count": total,
+                "complete": True,
+            })
+            nora_logger.info("[Phase 1.5] COMPLETE — %d narrative memory(ies) created | result=%s", total, result)
+            return result
+
+        next_entry = state["analyses"][state["current_index"]]
+        result = json.dumps({
+            "success": True,
+            "prompt": _build_humanize_prompt(next_entry),
+            "progress": f"Memory {state['current_index'] + 1}/{len(state['analyses'])}",
+            "complete": False,
+            "_nora_retry": False,
+        })
+        nora_logger.debug("[Phase 1.5] Next narrative response: %.300s", result)
+        return result
+
+    return json.dumps({"success": False, "error": f"Unknown action: {action}. Use 'start' or 'humanize'."})
+
+
+HUMANIZE_MEMORIES_SCHEMA = {
+    "name": "nora_humanize_memories",
+    "description": (
+        "[STICKY] Phase 1.5 of nightly memory reconciliation. "
+        "Convert structured session analyses into natural narrative memories. "
+        "Call with action='start' to begin, then action='humanize' with your narrative. "
+        "You MUST complete all analyses — there is no quit action."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["start", "humanize"],
+                "description": "'start' to begin, 'humanize' to submit narrative for current analysis",
+            },
+            "narrative": {
+                "type": "string",
+                "description": "2-3 paragraph narrative reminiscence covering all analysis fields",
+            },
+        },
+        "required": ["action"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
+# Tool 3: nora_dedup_memories
+# ---------------------------------------------------------------------------
+
+DEDUP_INSTRUCTIONS = (
+    "Compare the new memory (from today) with the 3 similar existing memories above. "
+    "Decide what to do:\n"
+    "- **keep**: This memory is unique enough. Store it as-is.\n"
+    "- **merge**: Similar but has new info. Combine into the oldest memory, "
+    "update timestamp to today.\n"
+    "- **replace**: The existing memory is stale/wrong. Replace with today's version.\n\n"
+    "Prioritize today's memory — newer information is more accurate."
+)
+
+
+def _load_new_narrative_memories(date_filter: str = "") -> List[Dict]:
+    """Load narrative_memories from today that haven't been deduped yet."""
+    collection = _get_collection()
+    where: Dict = {"type": "narrative_memory"}
+    if date_filter:
+        where = {"$and": [{"type": "narrative_memory"}, {"date": date_filter}]}
+    try:
+        results = collection.get(where=where)
+    except Exception:
+        return []
+    if not results or not results.get("ids"):
+        return []
+    entries = []
+    for i, doc_id in enumerate(results["ids"]):
+        text = (results.get("documents") or [""])[i] or ""
+        meta = (results.get("metadatas") or [{}])[i] or {}
+        entries.append({
+            "id": doc_id,
+            "text": text,
+            "metadata": meta,
+        })
+    return entries
+
+
+def _build_dedup_prompt(new_memory: Dict, similar_entries: List[Dict],
+                         similar_distances: List[float]) -> str:
+    """Build a prompt showing the new memory vs similar existing ones."""
+    new_text = new_memory.get("text", "")
+    new_meta = new_memory.get("metadata", {})
+    new_topic = new_meta.get("topic", "unknown")
+    new_date = new_meta.get("date", "today")
+
+    lines = [
+        f"## New Memory (today)\nTopic: {new_topic} | Date: {new_date}\n"
+        f"Content: {new_text[:600]}",
+        "\n## Similar Existing Memories\n",
+    ]
+    for i, entry in enumerate(similar_entries):
+        meta = entry.get("metadata", {})
+        dist = similar_distances[i] if i < len(similar_distances) else 1.0
+        similarity = 1.0 / (1.0 + dist)
+        text = entry.get("text", "")[:400]
+        lines.append(
+            f"### Match {i+1} (similarity: {similarity:.2f})\n"
+            f"Topic: {meta.get('topic', 'unknown')} | "
+            f"Date: {meta.get('date', 'unknown')}\n"
+            f"Content: {text}\n"
+        )
+
+    lines.append(f"\n{DEDUP_INSTRUCTIONS}")
+    lines.append(
+        "\nCall `nora_dedup_memories` with `action='decide'` and `decision='keep|merge|replace'`, "
+        "plus `target_id` (the existing memory id to merge/replace into)."
+    )
+    return "\n".join(lines)
+
+
+def nora_dedup_memories_handler(args: Dict, **kw) -> str:
+    """Phase 2: Deduplicate new narrative memories against existing vector store."""
+    nora_logger.debug("[Phase 2] TOOL CALLED args=%s", json.dumps(args, default=str, ensure_ascii=False))
+    action = (args.get("action") or "start").strip().lower()
+    decision = (args.get("decision") or "").strip().lower()
+    target_id = args.get("target_id", "")
+    task_id = kw.get("task_id", "default")
+
+    state = _dedup_state.get(task_id)
+    if state is None or action == "start":
+        memories = _load_new_narrative_memories(date_filter=_today_str())
+        if not memories:
+            result = json.dumps({
+                "success": True,
+                "message": "No new narrative memories to dedup. Run Phase 1.5 first.",
+                "complete": True,
+            })
+            nora_logger.info("[Phase 2] No new narrative memories to dedup | result=%s", result)
+            return result
+        state = {
+            "memories": memories,
+            "current_index": 0,
+            "completed": [],
+            "similar_cache": {},
+        }
+        _dedup_state[task_id] = state
+        nora_logger.info("[Phase 2] Started — %d memory(ies) to deduplicate", len(memories))
+
+    if state["current_index"] >= len(state["memories"]):
+        _dedup_state.pop(task_id, None)
+        total = len(state["completed"])
+        nora_logger.info("[Phase 2] COMPLETE — %d memory(ies) processed", total)
+        return json.dumps({
+            "success": True,
+            "message": f"Deduplication complete. {total} memories processed.",
+            "complete": True,
+        })
+
+    mem = state["memories"][state["current_index"]]
+
+    if action == "start":
+        # Compute similar entries
+        collection = _get_collection()
+        embed_fn = _get_storage_embed_fn()
+        mem_text = mem.get("text", "")
+        similar_ids, distances = _find_similar(
+            collection, mem_text, embed_fn, n=4,
+            extra_filter={"type": "narrative_memory"},
+        )
+        # Remove self from similar list
+        similar_entries = []
+        similar_distances = []
+        for j, sid in enumerate(similar_ids):
+            if sid == mem["id"]:
+                continue
+            meta_raw = {}
+            text_raw = ""
+            try:
+                res = collection.get(ids=[sid])
+                if res and res.get("metadatas"):
+                    meta_raw = res["metadatas"][0] or {}
+                if res and res.get("documents"):
+                    text_raw = res["documents"][0] or ""
+            except Exception:
+                pass
+            similar_entries.append({"id": sid, "text": text_raw, "metadata": meta_raw})
+            d = distances[j] if j < len(distances) else 1.0
+            similar_distances.append(d)
+            if len(similar_entries) >= 3:
+                break
+
+        state["similar_cache"][mem["id"]] = {
+            "entries": similar_entries,
+            "distances": similar_distances,
+        }
+        state["waiting_for_decision"] = True
+        nora_logger.debug(
+            "[Phase 2] Memory %d/%d — found %d similar entries. Asking for decision.",
+            state["current_index"] + 1, len(state["memories"]), len(similar_entries),
+        )
+
+        return json.dumps({
+            "success": True,
+            "prompt": _build_dedup_prompt(mem, similar_entries, similar_distances),
+            "progress": f"Memory {state['current_index'] + 1}/{len(state['memories'])}",
+            "complete": False,
+            "_nora_retry": False,
+        })
+
+    if action == "decide":
+        if decision not in ("keep", "merge", "replace"):
+            similar_data = state["similar_cache"].get(mem["id"], {})
+            nora_logger.warning(
+                "[Phase 2] Invalid decision '%s' for memory %s — retrying",
+                decision, mem["id"][:12],
+            )
+            return json.dumps({
+                "success": False,
+                "error": f"Invalid decision '{decision}'. Use: keep, merge, or replace.",
+                "prompt": _build_dedup_prompt(
+                    mem,
+                    similar_data.get("entries", []),
+                    similar_data.get("distances", []),
+                ),
+                "complete": False,
+                "_nora_retry": True,
+            })
+
+        similar_data = state["similar_cache"].get(mem["id"], {})
+        similar_entries = similar_data.get("entries", [])
+
+        try:
+            collection = _get_collection()
+
+            if decision == "keep":
+                state["completed"].append({"id": mem["id"], "action": "keep"})
+                nora_logger.info("[Phase 2] Memory %s — KEPT (unique)", mem["id"][:12])
+
+            elif decision == "merge" and target_id:
+                # Find the target entry
+                target_text = ""
+                target_meta = {}
+                try:
+                    res = collection.get(ids=[target_id])
+                    if res and res.get("documents"):
+                        target_text = res["documents"][0] or ""
+                    if res and res.get("metadatas"):
+                        target_meta = res["metadatas"][0] or {}
+                except Exception:
+                    pass
+                merged = mem.get("text", "") + "\n\n---\n\n" + target_text
+                target_meta["date"] = _today_str()
+                target_meta["timestamp"] = datetime.now().isoformat()
+                embed_fn = _get_storage_embed_fn()
+                embedding = embed_fn([merged])[0]
+                collection.update(
+                    ids=[target_id],
+                    embeddings=[embedding],
+                    documents=[merged],
+                    metadatas=[target_meta],
+                )
+                # Delete the new duplicate
+                collection.delete(ids=[mem["id"]])
+                state["completed"].append({"id": target_id, "action": "merge"})
+                nora_logger.info("[Phase 2] Memory %s — MERGED into %s", mem["id"][:12], target_id[:12])
+
+            elif decision == "replace" and target_id:
+                embed_fn = _get_storage_embed_fn()
+                embedding = embed_fn([mem.get("text", "")])[0]
+                collection.update(
+                    ids=[target_id],
+                    embeddings=[embedding],
+                    documents=[mem.get("text", "")],
+                    metadatas=[{
+                        **mem.get("metadata", {}),
+                        "date": _today_str(),
+                        "timestamp": datetime.now().isoformat(),
+                    }],
+                )
+                collection.delete(ids=[mem["id"]])
+                state["completed"].append({"id": target_id, "action": "replace"})
+                nora_logger.info("[Phase 2] Memory %s — REPLACED existing %s", mem["id"][:12], target_id[:12])
+
+            else:
+                nora_logger.warning("[Phase 2] Memory %s — merge/replace missing target_id", mem["id"][:12])
+                return json.dumps({
+                    "success": False,
+                    "error": "merge/replace requires 'target_id' — the ID of the existing memory to modify.",
+                    "prompt": _build_dedup_prompt(mem, similar_entries, similar_data.get("distances", [])),
+                    "complete": False,
+                    "_nora_retry": True,
+                })
+
+        except Exception as exc:
+            logger.warning("Dedup operation failed: %s", exc)
+            nora_logger.error("[Phase 2] Memory %s — operation failed: %s", mem["id"][:12], exc)
+            return json.dumps({
+                "success": False,
+                "error": f"Operation failed: {exc}",
+                "complete": False,
+                "_nora_retry": True,
+            })
+
+        state["waiting_for_decision"] = False
+        state["current_index"] += 1
+
+        if state["current_index"] >= len(state["memories"]):
+            _dedup_state.pop(task_id, None)
+            total = len(state["completed"])
+            nora_logger.info("[Phase 2] COMPLETE — %d memory(ies) deduplicated. Proceeding to Phase 3", total)
+            return json.dumps({
+                "success": True,
+                "message": f"All {total} memories deduplicated. Phase 2 complete.",
+                "complete": True,
+            })
+
+        next_mem = state["memories"][state["current_index"]]
+        collection = _get_collection()
+        embed_fn = _get_storage_embed_fn()
+        mem_text = next_mem.get("text", "")
+        similar_ids, distances = _find_similar(
+            collection, mem_text, embed_fn, n=4,
+            extra_filter={"type": "narrative_memory"},
+        )
+        similar_entries = []
+        similar_distances = []
+        for j, sid in enumerate(similar_ids):
+            if sid == next_mem["id"]:
+                continue
+            meta_raw = {}
+            text_raw = ""
+            try:
+                res = collection.get(ids=[sid])
+                if res and res.get("metadatas"):
+                    meta_raw = res["metadatas"][0] or {}
+                if res and res.get("documents"):
+                    text_raw = res["documents"][0] or ""
+            except Exception:
+                pass
+            similar_entries.append({"id": sid, "text": text_raw, "metadata": meta_raw})
+            d = distances[j] if j < len(distances) else 1.0
+            similar_distances.append(d)
+            if len(similar_entries) >= 3:
+                break
+
+        state["similar_cache"][next_mem["id"]] = {
+            "entries": similar_entries,
+            "distances": similar_distances,
+        }
+        state["waiting_for_decision"] = True
+
+        return json.dumps({
+            "success": True,
+            "prompt": _build_dedup_prompt(next_mem, similar_entries, similar_distances),
+            "progress": f"Memory {state['current_index'] + 1}/{len(state['memories'])}",
+            "complete": False,
+            "_nora_retry": False,
+        })
+
+    return json.dumps({"success": False, "error": f"Unknown action: {action}. Use 'start' or 'decide'."})
+
+
+DEDUP_MEMORIES_SCHEMA = {
+    "name": "nora_dedup_memories",
+    "description": (
+        "[STICKY] Phase 2 of nightly memory reconciliation. "
+        "Deduplicate new narrative memories against existing vector store. "
+        "Call with action='start' to begin, then action='decide' with your decision. "
+        "You MUST complete all memories — there is no quit action."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["start", "decide"],
+                "description": "'start' to begin, 'decide' to submit your dedup decision",
+            },
+            "decision": {
+                "type": "string",
+                "enum": ["keep", "merge", "replace"],
+                "description": "keep=unique, merge=combine into oldest, replace=overwrite oldest",
+            },
+            "target_id": {
+                "type": "string",
+                "description": "ID of existing memory to merge/replace into (required for merge/replace)",
+            },
+        },
+        "required": ["action"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # Plugin registration
 # ---------------------------------------------------------------------------
 
@@ -1124,6 +2159,29 @@ def register(ctx: Any) -> None:
     ctx.register_hook("pre_llm_call", _on_skill_inject)
     ctx.register_hook("post_llm_call", _on_post_llm_call)
     ctx.register_hook("on_session_finalize", _on_session_finalize)
+
+    # Register Nora's memory management tools
+    ctx.register_tool(
+        name="nora_analyze_sessions",
+        toolset="nora-memory",
+        schema=ANALYZE_SESSIONS_SCHEMA,
+        handler=nora_analyze_sessions_handler,
+        emoji="🔍",
+    )
+    ctx.register_tool(
+        name="nora_humanize_memories",
+        toolset="nora-memory",
+        schema=HUMANIZE_MEMORIES_SCHEMA,
+        handler=nora_humanize_memories_handler,
+        emoji="📝",
+    )
+    ctx.register_tool(
+        name="nora_dedup_memories",
+        toolset="nora-memory",
+        schema=DEDUP_MEMORIES_SCHEMA,
+        handler=nora_dedup_memories_handler,
+        emoji="🔄",
+    )
 
     # Pre-load embedding model at startup so first query is fast
     # (model download happens here if not cached, takes ~30s once)

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Hermes Agent CLI - Interactive Terminal Interface
+Nora CLI - Interactive Terminal Interface
 
-A beautiful command-line interface for the Hermes Agent, inspired by Claude Code.
+A beautiful command-line interface for Nora, inspired by Claude Code.
 Features ASCII art branding, interactive REPL, toolset selection, and rich formatting.
 
 Usage:
@@ -3172,7 +3172,7 @@ def _build_compact_banner() -> str:
         line1 = "⚕ NOUS HERMES - AI Agent Framework"
         tiny_line = "⚕ NOUS HERMES"
     else:
-        agent_name = _skin.get_branding("agent_name", "Hermes Agent") if _skin else "Hermes Agent"
+        agent_name = _skin.get_branding("agent_name", "Nora") if _skin else "Nora"
         line1 = f"{agent_name} - AI Agent Framework"
         tiny_line = agent_name
 
@@ -3180,7 +3180,7 @@ def _build_compact_banner() -> str:
         from hermes_cli import __release_date__ as _release_date
         from hermes_cli import __version__ as _version
 
-        version_line = f"Hermes Agent v{_version} ({_release_date})"
+        version_line = f"Nora v{_version} ({_release_date})"
     else:
         version_line = format_banner_version_label()
 
@@ -3357,7 +3357,7 @@ def save_config_value(key_path: str, value: any) -> bool:
 
 class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
     """
-    Interactive CLI for the Hermes Agent.
+    Interactive CLI for Nora.
     
     Provides a REPL interface with rich formatting, command history,
     and tool execution capabilities.
@@ -5456,9 +5456,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         # Emit complete lines, keep partial remainder in buffer
         _tc = getattr(self, "_stream_text_ansi", "")
+        _wrap_width = max(30, self._scrollback_box_width() - 8)
 
         def _emit_one(printed_line: str) -> None:
-            _cprint(f"{_STREAM_PAD}{_tc}{printed_line}{_RST}" if _tc else f"{_STREAM_PAD}{printed_line}")
+            if len(printed_line) > _wrap_width:
+                import textwrap as _tw
+                wrapped = _tw.fill(printed_line, width=_wrap_width)
+                for wl in wrapped.split("\n"):
+                    _cprint(f"{_STREAM_PAD}{_tc}{wl}{_RST}" if _tc else f"{_STREAM_PAD}{wl}")
+            else:
+                _cprint(f"{_STREAM_PAD}{_tc}{printed_line}{_RST}" if _tc else f"{_STREAM_PAD}{printed_line}")
 
         def _flush_table_buf() -> None:
             buf = self._stream_table_buf
@@ -5544,7 +5551,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
 
         if self._stream_buf:
             line = _strip_markdown_syntax(self._stream_buf) if self.final_response_markdown == "strip" else self._stream_buf
-            _cprint(f"{_STREAM_PAD}{_tc}{line}{_RST}" if _tc else f"{_STREAM_PAD}{line}")
+            _wrap_w = max(30, self._scrollback_box_width() - 8)
+            if len(line) > _wrap_w:
+                import textwrap as _tw
+                for wl in _tw.fill(line, width=_wrap_w).split("\n"):
+                    _cprint(f"{_STREAM_PAD}{_tc}{wl}{_RST}" if _tc else f"{_STREAM_PAD}{wl}")
+            else:
+                _cprint(f"{_STREAM_PAD}{_tc}{line}{_RST}" if _tc else f"{_STREAM_PAD}{line}")
             self._stream_buf = ""
 
         # Close the response box
@@ -5850,7 +5863,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             self._console_print()
             self._console_print(
                 "[bold yellow]⚠  Nous Research Hermes 3 & 4 models are NOT agentic and are not "
-                "designed for use with Hermes Agent.[/]"
+                "designed for use with Nora.[/]"
             )
             self._console_print(
                 "[dim]   They lack tool-calling capabilities required for agent workflows. "
@@ -12477,10 +12490,10 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
         try:
             from hermes_cli.skin_engine import get_active_skin
             _welcome_skin = get_active_skin()
-            _welcome_text = _welcome_skin.get_branding("welcome", "Welcome to Hermes Agent! Type your message or /help for commands.")
+            _welcome_text = _welcome_skin.get_branding("welcome", "Welcome to Nora! Type your message or /help for commands.")
             _welcome_color = _welcome_skin.get_color("banner_text", "#FFF8DC")
         except Exception:
-            _welcome_text = "Welcome to Hermes Agent! Type your message or /help for commands."
+            _welcome_text = "Welcome to Nora! Type your message or /help for commands."
             _welcome_color = "#FFF8DC"
         self._console_print(f"[{_welcome_color}]{_welcome_text}[/]")
 
@@ -13324,7 +13337,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
             import signal as _sig
             from prompt_toolkit.application import run_in_terminal
             from hermes_cli.skin_engine import get_active_skin
-            agent_name = get_active_skin().get_branding("agent_name", "Hermes Agent")
+            agent_name = get_active_skin().get_branding("agent_name", "Nora")
             msg = f"\n{agent_name} has been suspended. Run `fg` to bring {agent_name} back."
             def _suspend():
                 os.write(1, msg.encode())
@@ -15052,7 +15065,7 @@ def main(
     ignore_rules: bool = False,
 ):
     """
-    Hermes Agent CLI - Interactive AI Assistant
+    Nora CLI - Interactive AI Assistant
     
     Args:
         query: Single query to execute (then exit). Alias: -q
@@ -15153,21 +15166,27 @@ def main(
                 else:
                     toolsets_list.append(str(t))
     else:
-        # Coding posture (base Hermes): with no explicit --toolsets, collapse
-        # to the coding toolset (+ enabled MCP servers) when sitting in a code
-        # workspace. See agent/coding_context.py.
-        _coding = None
-        try:
-            from agent.coding_context import coding_selection
-            _coding = coding_selection(platform="cli", config=CLI_CONFIG)
-        except Exception:
-            _coding = None
-        if _coding is not None:
-            toolsets_list = _coding
+        # No explicit --toolsets flag: use global config.toolsets first,
+        # fall back to platform-specific resolution.
+        global_toolsets = CLI_CONFIG.get("toolsets")
+        if global_toolsets:
+            toolsets_list = list(global_toolsets)
         else:
-            # Use the shared resolver so MCP servers are included at runtime
-            from hermes_cli.tools_config import _get_platform_tools
-            toolsets_list = sorted(_get_platform_tools(CLI_CONFIG, "cli"))
+            # Coding posture (base Hermes): with no explicit --toolsets, collapse
+            # to the coding toolset (+ enabled MCP servers) when sitting in a code
+            # workspace. See agent/coding_context.py.
+            _coding = None
+            try:
+                from agent.coding_context import coding_selection
+                _coding = coding_selection(platform="cli", config=CLI_CONFIG)
+            except Exception:
+                _coding = None
+            if _coding is not None:
+                toolsets_list = _coding
+            else:
+                # Use the shared resolver so MCP servers are included at runtime
+                from hermes_cli.tools_config import _get_platform_tools
+                toolsets_list = sorted(_get_platform_tools(CLI_CONFIG, "cli"))
     
     parsed_skills = _parse_skills_argument(skills)
 

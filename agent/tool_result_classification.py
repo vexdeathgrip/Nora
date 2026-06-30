@@ -9,6 +9,11 @@ from typing import Any
 FILE_MUTATING_TOOL_NAMES = frozenset({"write_file", "patch"})
 
 
+def make_user_message(content: str) -> dict:
+    """Create a user message dictionary."""
+    return {"role": "user", "content": content}
+
+
 def file_mutation_result_landed(tool_name: str, result: Any) -> bool:
     """Return True when a file mutation result proves the write landed."""
     if tool_name not in FILE_MUTATING_TOOL_NAMES or not isinstance(result, str):

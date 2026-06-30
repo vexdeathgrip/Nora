@@ -19,6 +19,7 @@ from agent.tool_result_classification import file_mutation_result_landed
 
 IDEMPOTENT_TOOL_NAMES = frozenset(
     {
+        "discover_tools",
         "read_file",
         "search_files",
         "web_search",
@@ -44,7 +45,7 @@ MUTATING_TOOL_NAMES = frozenset(
         "execute_code",
         "write_file",
         "patch",
-        "todo",
+        "todo_list",
         "memory",
         "skill_manage",
         "browser_click",
@@ -151,6 +152,7 @@ class ToolGuardrailDecision:
     tool_name: str = ""
     count: int = 0
     signature: ToolCallSignature | None = None
+    last_error: str = ""  # Truncated error snippet from the failed tool call
 
     @property
     def allows_execution(self) -> bool:
@@ -170,6 +172,8 @@ class ToolGuardrailDecision:
         }
         if self.signature is not None:
             data["signature"] = self.signature.to_metadata()
+        if self.last_error:
+            data["last_error"] = self.last_error[:200]
         return data
 
 
@@ -233,6 +237,10 @@ class ToolCallGuardrailController:
         self._same_tool_failure_counts: dict[str, int] = {}
         self._no_progress: dict[ToolCallSignature, tuple[str, int]] = {}
         self._halt_decision: ToolGuardrailDecision | None = None
+        # Track last error per tool across the conversation (persists across turns)
+        self._last_error_by_tool: dict[str, str] = {}
+        # Track halt counts per tool (persists across turns)
+        self._halt_counts_by_tool: dict[str, int] = {}
 
     @property
     def halt_decision(self) -> ToolGuardrailDecision | None:
@@ -249,15 +257,21 @@ class ToolCallGuardrailController:
                 action="block",
                 code="repeated_exact_failure_block",
                 message=(
-                    f"Blocked {tool_name}: the same tool call failed {exact_count} "
-                    "times with identical arguments. Stop retrying it unchanged; "
-                    "change strategy or explain the blocker."
+                    f"BLOCKED {tool_name}: failed {exact_count} times with identical arguments. "
+                    "DO NOT STOP CALLING TOOLS. DO NOT give up. "
+                    "This specific tool call is blocked, but you have MANY other tools. "
+                    "Use a DIFFERENT tool IMMEDIATELY: skills_list, discover_tools, memory, "
+                    "todo_list, web_search, read_file, list_directory, write_file, patch — "
+                    "ANY tool other than this exact call. Your task is NOT complete. "
+                    "Keep working until you finish."
                 ),
                 tool_name=tool_name,
                 count=exact_count,
                 signature=signature,
+                last_error=self._last_error_by_tool.get(tool_name, ""),
             )
             self._halt_decision = decision
+            self._halt_counts_by_tool[tool_name] = self._halt_counts_by_tool.get(tool_name, 0) + 1
             return decision
 
         if self._is_idempotent(tool_name):
@@ -269,9 +283,37 @@ class ToolCallGuardrailController:
                         action="block",
                         code="idempotent_no_progress_block",
                         message=(
-                            f"Blocked {tool_name}: this read-only call returned the same "
-                            f"result {repeat_count} times. Stop repeating it unchanged; "
-                            "use the result already provided or try a different query."
+                            f"BLOCKED {tool_name}: returned the same result {repeat_count} times. "
+                            "DO NOT STOP CALLING TOOLS. DO NOT give up. "
+                            "This tool is not making progress, but you have MANY other tools. "
+                            "Use the result you already have, or call a DIFFERENT tool IMMEDIATELY: "
+                            "skills_list, discover_tools, memory, todo_list, web_search, "
+                            "read_file, list_directory — ANY tool other than this one. "
+                            "Your task is NOT complete. Keep working until you finish."
+                        ),
+                        tool_name=tool_name,
+                        count=repeat_count,
+                        signature=signature,
+                    )
+                    self._halt_decision = decision
+                    return decision
+        else:
+            # Also check successful repetitions for non-idempotent tools.
+            record = self._no_progress.get(signature)
+            if record is not None:
+                _result_hash, repeat_count = record
+                if repeat_count >= self.config.no_progress_block_after:
+                    decision = ToolGuardrailDecision(
+                        action="block",
+                        code="successful_repetition_block",
+                        message=(
+                            f"BLOCKED {tool_name}: returned the same result {repeat_count} times. "
+                            "This command is not making progress. "
+                            "DO NOT STOP CALLING TOOLS. DO NOT give up. "
+                            "Use the result you already have, or call a DIFFERENT tool IMMEDIATELY: "
+                            "skills_list, discover_tools, memory, todo_list, web_search, "
+                            "read_file, list_directory — ANY tool other than this one. "
+                            "Your task is NOT complete. Keep working until you finish."
                         ),
                         tool_name=tool_name,
                         count=repeat_count,
@@ -289,6 +331,7 @@ class ToolCallGuardrailController:
         result: str | None,
         *,
         failed: bool | None = None,
+        error_snippet: str = "",
     ) -> ToolGuardrailDecision:
         args = _coerce_args(args)
         signature = ToolCallSignature.from_call(tool_name, args)
@@ -302,6 +345,17 @@ class ToolCallGuardrailController:
 
             same_count = self._same_tool_failure_counts.get(tool_name, 0) + 1
             self._same_tool_failure_counts[tool_name] = same_count
+
+            # Track error snippet across turns
+            if error_snippet:
+                self._last_error_by_tool[tool_name] = error_snippet[:300]
+            elif result:
+                import re as _re
+                err_match = _re.search(r'(?:Error|Exception|FAILED)[^\n]{0,300}', result, _re.IGNORECASE)
+                if err_match:
+                    self._last_error_by_tool[tool_name] = err_match.group(0)[:300]
+                else:
+                    self._last_error_by_tool[tool_name] = result[:300]
 
             if self.config.hard_stop_enabled and same_count >= self.config.same_tool_failure_halt_after:
                 decision = ToolGuardrailDecision(

@@ -158,9 +158,6 @@ class TodoStore:
         Ensures required fields exist and status is valid.
         Returns a clean dict with only {id, content, status}.
         """
-        if not isinstance(item, dict):
-            return {"id": "?", "content": "(invalid item)", "status": "pending"}
-
         item_id = str(item.get("id", "")).strip()
         if not item_id:
             item_id = "?"
@@ -182,10 +179,6 @@ class TodoStore:
         """Collapse duplicate ids, keeping the last occurrence in its position."""
         last_index: Dict[str, int] = {}
         for i, item in enumerate(todos):
-            if not isinstance(item, dict):
-                # Non-dict items get a synthetic key so _validate can handle them
-                last_index[f"__invalid_{i}"] = i
-                continue
             item_id = str(item.get("id", "")).strip() or "?"
             last_index[item_id] = i
         return [todos[i] for i in sorted(last_index.values())]
@@ -211,16 +204,6 @@ def todo_tool(
         return tool_error("TodoStore not initialized")
 
     if todos is not None:
-        # Guard: LLM sometimes sends todos as a JSON string instead of a list
-        if isinstance(todos, str):
-            try:
-                todos = json.loads(todos)
-            except (json.JSONDecodeError, TypeError):
-                return tool_error("todos must be a list of objects, got unparseable string")
-        if not isinstance(todos, list):
-            return tool_error(
-                f"todos must be a list, got {type(todos).__name__}"
-            )
         items = store.write(todos, merge)
     else:
         items = store.read()
@@ -260,6 +243,11 @@ TODO_SCHEMA = {
         "Manage your task list for the current session. Use for complex tasks "
         "with 3+ steps or when the user provides multiple tasks. "
         "Call with no parameters to read the current list.\n\n"
+        "IMPORTANT: Break tasks into ATOMIC steps. Each todo item should be "
+        "a single tool call or simple action. Do NOT create one big item for "
+        "a complex job — create 3-5 small ones. Examples of atomic tasks: "
+        "\"Read file X\", \"Search web for Y\", \"Save memory about Z\". "
+        "NOT: \"Do research\" or \"Complete the project\".\n\n"
         "Writing:\n"
         "- Provide 'todos' array to create/update items\n"
         "- merge=false (default): replace the entire list with a fresh plan\n"
@@ -267,8 +255,8 @@ TODO_SCHEMA = {
         "Each item: {id: string, content: string, "
         "status: pending|in_progress|completed|cancelled}\n"
         "List order is priority. Only ONE item in_progress at a time.\n"
-        "Mark items completed immediately when done. If something fails, "
-        "cancel it and add a revised item.\n\n"
+        "Mark items completed IMMEDIATELY when done — do not wait. "
+        "If something fails, cancel it and add a revised item.\n\n"
         "Always returns the full current list."
     ),
     "parameters": {
@@ -312,14 +300,15 @@ TODO_SCHEMA = {
 
 
 # --- Registry ---
-from tools.registry import registry, tool_error
-
-registry.register(
-    name="todo",
-    toolset="todo",
-    schema=TODO_SCHEMA,
-    handler=lambda args, **kw: todo_tool(
-        todos=args.get("todos"), merge=args.get("merge", False), store=kw.get("store")),
-    check_fn=check_todo_requirements,
-    emoji="📋",
-)
+# DISABLED: Replaced by todo_list plugin in ~/.hermes/plugins/todo-list/
+# from tools.registry import registry, tool_error
+#
+# registry.register(
+#     name="todo",
+#     toolset="todo",
+#     schema=TODO_SCHEMA,
+#     handler=lambda args, **kw: todo_tool(
+#         todos=args.get("todos"), merge=args.get("merge", False), store=kw.get("store")),
+#     check_fn=check_todo_requirements,
+#     emoji="📋",
+# )

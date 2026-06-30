@@ -59,6 +59,72 @@ def get_memory_dir() -> Path:
 ENTRY_DELIMITER = "\n§\n"
 
 
+def _write_to_vector_store(content: str, target: str, action: str = "add") -> bool:
+    """Write a memory entry to the ChromaDB vector store for vector_search retrieval.
+    
+    Uses the same collection and embedding function as the vector-context plugin
+    so entries are searchable via vector_search().
+    
+    Returns True if write succeeded, False otherwise (non-fatal).
+    """
+    try:
+        import chromadb
+        import hashlib
+        from datetime import datetime
+        
+        data_path = str(get_hermes_home() / "vector_store")
+        client = chromadb.PersistentClient(path=data_path)
+        
+        # Import the same embedding function as vector-context plugin
+        import sys as _sys
+        from pathlib import Path as _P
+        _plugin_dir = str(_P.home() / ".hermes" / "plugins" / "vector-context")
+        if _plugin_dir not in _sys.path:
+            _sys.path.insert(0, _plugin_dir)
+        from spreading import _CachedEmbeddingFunction
+        
+        collection = client.get_or_create_collection(
+            name="hermes_conversations",
+            embedding_function=_CachedEmbeddingFunction(),
+        )
+        
+        # Generate a unique ID for this memory entry
+        now = datetime.now()
+        content_hash = hashlib.md5(content.encode()).hexdigest()[:12]
+        doc_id = f"memory-{target}-{content_hash}"
+        
+        # Build metadata matching vector-context plugin signature
+        meta = {
+            "text": content,
+            "session_id": "cron-memory",
+            "platform": "memory-tool",
+            "type": "memory",
+            "topics": target,
+            "topic": target,
+            "date": now.strftime("%Y-%m-%d"),
+            "timestamp": now.isoformat(),
+            "word_count": len(content.split()),
+            "keywords": "",
+            "speaker": "nora",
+            "content_type": "memory-entry",
+            "emotion": "neutral",
+            "content_category": f"memory-{target}",
+            "identity_type": "agent-memory",
+            "source": f"memory-tool-{action}",
+        }
+        
+        collection.upsert(
+            documents=[content],
+            metadatas=[meta],
+            ids=[doc_id],
+        )
+        logger.debug("Vector store write succeeded for memory entry: %s", doc_id)
+        return True
+    except Exception as exc:
+        logger.debug("Vector store write failed (non-fatal): %s", exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Memory content scanning — lightweight check for injection/exfiltration
 # in content that gets injected into the system prompt.
@@ -347,6 +413,9 @@ class MemoryStore:
             self._set_entries(target, entries)
             self.save_to_disk(target)
 
+        # Also write to vector store for vector_search retrieval
+        _write_to_vector_store(content, target, action="add")
+
         return self._success_response(target, "Entry added.")
 
     def replace(self, target: str, old_text: str, new_content: str) -> Dict[str, Any]:
@@ -411,6 +480,9 @@ class MemoryStore:
             entries[idx] = new_content
             self._set_entries(target, entries)
             self.save_to_disk(target)
+
+        # Also write to vector store for vector_search retrieval
+        _write_to_vector_store(new_content, target, action="replace")
 
         return self._success_response(target, "Entry replaced.")
 
@@ -927,6 +999,20 @@ def memory_tool(
     if target not in {"memory", "user"}:
         return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
 
+    # --- Read path (no write gate needed) ---------------------------------
+    if action == "read":
+        entries = store._entries_for(target)
+        current = store._char_count(target)
+        limit = store._char_limit(target)
+        pct = min(100, int((current / limit) * 100)) if limit > 0 else 0
+        return json.dumps({
+            "success": True,
+            "target": target,
+            "entries": entries,
+            "usage": f"{pct}% — {current:,}/{limit:,} chars",
+            "entry_count": len(entries),
+        }, ensure_ascii=False)
+
     # --- Batch path -------------------------------------------------------
     if operations:
         if not isinstance(operations, list):
@@ -970,7 +1056,7 @@ def memory_tool(
         result = store.remove(target, old_text)
 
     else:
-        return tool_error(f"Unknown action '{action}'. Use: add, replace, remove", success=False)
+        return tool_error(f"Unknown action '{action}'. Use: add, replace, remove, read", success=False)
 
     return json.dumps(result, ensure_ascii=False)
 
@@ -1031,8 +1117,8 @@ MEMORY_SCHEMA = {
         "properties": {
             "action": {
                 "type": "string",
-                "enum": ["add", "replace", "remove"],
-                "description": "The action to perform (single-op shape). Omit when using 'operations'."
+                "enum": ["add", "replace", "remove", "read"],
+                "description": "The action to perform. 'read' returns current entries without writing."
             },
             "target": {
                 "type": "string",

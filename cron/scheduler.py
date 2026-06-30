@@ -1737,8 +1737,14 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
             has_injected_data = True
 
     # Inject output from referenced cron jobs as context.
+    # Default: self-chain (use own previous output). Set context_from to
+    # "none" or false to disable, or provide explicit job IDs to chain
+    # from other jobs.
     context_from = job.get("context_from")
-    if context_from:
+    job_id = job.get("id")
+    if context_from is None and job_id:
+        context_from = [job_id]  # self-chain by default
+    if context_from is not False and context_from != "none":
         from cron.jobs import OUTPUT_DIR
         if isinstance(context_from, str):
             context_from = [context_from]
@@ -1757,19 +1763,36 @@ def _build_job_prompt(job: dict, prerun_script: Optional[tuple] = None) -> str:
                 job_output_dir = OUTPUT_DIR / source_job_id
                 if not job_output_dir.exists():
                     continue  # silent skip — no output yet
+                # Sort by filename timestamp for reliable ordering.
                 output_files = sorted(
                     job_output_dir.glob("*.md"),
-                    key=lambda f: f.stat().st_mtime,
+                    key=lambda f: f.name,
                     reverse=True,
                 )
                 if not output_files:
                     continue  # silent skip — no output yet
-                latest_output = output_files[0].read_text(encoding="utf-8").strip()
-                # Truncate to 8K characters to avoid prompt bloat
-                _MAX_CONTEXT_CHARS = 8000
-                if len(latest_output) > _MAX_CONTEXT_CHARS:
-                    latest_output = latest_output[:_MAX_CONTEXT_CHARS] + "\n\n[... output truncated ...]"
+
+                # Find the most recent non-error output file.
+                latest_output = None
+                for output_file in output_files:
+                    try:
+                        content = output_file.read_text(encoding="utf-8").strip()
+                    except (OSError, PermissionError):
+                        continue
+                    if not content:
+                        continue
+                    # Skip error/failed outputs — do not feed error context into next run.
+                    lower_content = content[:500].lower()
+                    if "(failed)" in lower_content or "## error\n" in lower_content:
+                        continue
+                    latest_output = content
+                    break
+
                 if latest_output:
+                    # Truncate to 8K characters to avoid prompt bloat
+                    _MAX_CONTEXT_CHARS = 8000
+                    if len(latest_output) > _MAX_CONTEXT_CHARS:
+                        latest_output = latest_output[:_MAX_CONTEXT_CHARS] + "\n\n[... output truncated ...]"
                     prompt = (
                         f"## Output from job '{source_job_id}'\n"
                         "The following is the most recent output from a preceding "
@@ -2493,7 +2516,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             # Without a workdir, keep cwd context discovery disabled.
             skip_context_files=not bool(_job_workdir),
             load_soul_identity=True,
-            skip_memory=True,  # Cron system prompts would corrupt user representations
+            skip_memory=False,  # Enable memory so cron jobs can recall/save learnings
             platform="cron",
             session_id=_cron_session_id,
             session_db=_session_db,

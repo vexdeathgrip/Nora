@@ -815,7 +815,9 @@ def create_job(
                 anything else via Python.
         context_from: Optional job ID (or list of job IDs) whose most recent output
                       is injected into the prompt as context before each run.
-                      Useful for chaining cron jobs: job A finds data, job B processes it.
+                      Default (None): self-chain — the job reads its own previous output.
+                      Set to "none" or false to disable context injection.
+                      Provide explicit job IDs to chain from other jobs.
         enabled_toolsets: Optional list of toolset names to restrict the agent to.
                           When set, only tools from these toolsets are loaded, reducing
                           token overhead. When omitted, all default tools are loaded.

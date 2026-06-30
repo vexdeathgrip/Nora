@@ -16692,10 +16692,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     _conversation_kwargs["persist_user_message"] = _persist_user_message_override
                 elif observed_group_context:
                     _conversation_kwargs["persist_user_message"] = message
-                if moa_config is not None:
-                    _conversation_kwargs["moa_config"] = moa_config
                 if _persist_user_timestamp_override is not None:
                     _conversation_kwargs["persist_user_timestamp"] = _persist_user_timestamp_override
+                _conversation_kwargs.pop("persist_user_timestamp", None)
                 result = agent.run_conversation(_api_run_message, **_conversation_kwargs)
             finally:
                 unregister_gateway_notify(_approval_session_key)

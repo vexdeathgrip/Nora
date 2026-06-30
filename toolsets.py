@@ -92,6 +92,44 @@ _HERMES_WEBHOOK_SAFE_TOOLS = [
 # Core toolset definitions
 # These can include individual tools or reference other toolsets
 TOOLSETS = {
+    # Nora's minimal core toolset — ~20 essential tools
+    "nora-minimal": {
+        "description": "Nora's core toolset with essential tools",
+        "tools": [
+            "read_file", "write_file", "search_files",
+            "terminal", "process",
+            "memory", "session_search", "vector_search",
+            "skill_view", "skills_list", "skill_manage", "skill_search",
+            "execute_code", "clarify",
+            "delegate_task",
+            "discover_tools",
+            "self_update",
+            "web_search",
+        ],
+        "includes": []
+    },
+    # Nora's nightly memory management toolset — same as minimal but
+    # no execute_code (+ todo_list for task tracking, nora_* tools for
+    # the dedicated memory pipeline)
+    "nora-memory": {
+        "description": "Nora's nightly memory management toolset",
+        "tools": [
+            "read_file", "write_file", "search_files",
+            "terminal", "process",
+            "memory", "session_search", "vector_search",
+            "skill_view", "skills_list", "skill_manage", "skill_search",
+            "clarify",
+            "delegate_task",
+            "discover_tools",
+            "self_update",
+            "web_search",
+            "todo_list",
+            "nora_analyze_sessions",
+            "nora_humanize_memories",
+            "nora_dedup_memories",
+        ],
+        "includes": []
+    },
     # Basic toolsets - individual tool categories
     "web": {
         "description": "Web research and content extraction tools",

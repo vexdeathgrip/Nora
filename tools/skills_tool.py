@@ -79,10 +79,7 @@ from typing import Dict, Any, List, Optional, Set, Tuple
 from tools.registry import registry, tool_error
 from hermes_cli.config import cfg_get
 from utils import env_var_enabled
-from agent.skill_utils import (
-    EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS,
-    is_skill_support_path as _is_skill_support_path,
-)
+from agent.skill_utils import EXCLUDED_SKILL_DIRS as _EXCLUDED_SKILL_DIRS
 
 logger = logging.getLogger(__name__)
 
@@ -92,6 +89,18 @@ logger = logging.getLogger(__name__)
 # skills all coexist here without polluting the git repo.
 HERMES_HOME = get_hermes_home()
 SKILLS_DIR = HERMES_HOME / "skills"
+
+
+def _import_skill_store():
+    """Import skill_store from the vector-context plugin."""
+    import importlib.util
+    skill_store_path = HERMES_HOME / "plugins" / "vector-context" / "skill_store.py"
+    if not skill_store_path.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("skill_store", skill_store_path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
 
 # Anthropic-recommended limits for progressive disclosure efficiency
 MAX_NAME_LENGTH = 64
@@ -586,15 +595,11 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
         config = load_config()
         skills_cfg = config.get("skills", {})
         resolved_platform = platform or os.getenv("HERMES_PLATFORM") or _get_session_platform()
-        global_disabled = skills_cfg.get("disabled", [])
         if resolved_platform:
             platform_disabled = cfg_get(skills_cfg, "platform_disabled", resolved_platform)
             if platform_disabled is not None:
-                # A globally-disabled skill stays disabled on every platform;
-                # the platform list adds to it rather than replacing it. Keep
-                # in sync with agent.skill_utils.get_disabled_skill_names.
-                return name in platform_disabled or name in global_disabled
-        return name in global_disabled
+                return name in platform_disabled
+        return name in skills_cfg.get("disabled", [])
     except Exception:
         return False
 
@@ -686,64 +691,45 @@ def _sort_skills(skills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 def skills_list(category: str = None, task_id: str = None) -> str:
     """
-    List all available skills (progressive disclosure tier 1 - minimal metadata).
+    List recently used skills (MRU cache, max 10).
 
-    Returns only name + description to minimize token usage. Use skill_view() to
-    load full content, tags, related files, etc.
+    Shows skills you've recently viewed. For full discovery, use skill_search().
 
     Args:
         category: Optional category filter (e.g., "mlops")
         task_id: Optional task identifier used to probe the active backend
 
     Returns:
-        JSON string with minimal skill info: name, description, category
+        JSON string with recently used skill names
     """
     try:
-        if not SKILLS_DIR.exists():
-            SKILLS_DIR.mkdir(parents=True, exist_ok=True)
+        skill_store = _import_skill_store()
+        if not skill_store:
+            return json.dumps(
+                {"success": True, "skills": [], "message": "Skill store not available."},
+                ensure_ascii=False,
+            )
+
+        recent = skill_store.get_recent_skills()
+
+        if not recent:
             return json.dumps(
                 {
                     "success": True,
                     "skills": [],
-                    "categories": [],
-                    "message": f"No skills found. Skills directory created at {display_hermes_home()}/skills/",
+                    "message": "No recently used skills. Use skill_search(query) to find skills.",
                 },
                 ensure_ascii=False,
             )
 
-        # Find all skills
-        all_skills = _find_all_skills()
-
-        if not all_skills:
-            return json.dumps(
-                {
-                    "success": True,
-                    "skills": [],
-                    "categories": [],
-                    "message": "No skills found in skills/ directory.",
-                },
-                ensure_ascii=False,
-            )
-
-        # Filter by category if specified
-        if category:
-            all_skills = [s for s in all_skills if s.get("category") == category]
-
-        # Sort by category then name
-        all_skills = _sort_skills(all_skills)
-
-        # Extract unique categories
-        categories = sorted(
-            {s.get("category") for s in all_skills if s.get("category")}
-        )
+        skills = [{"name": name} for name in recent]
 
         return json.dumps(
             {
                 "success": True,
-                "skills": all_skills,
-                "categories": categories,
-                "count": len(all_skills),
-                "hint": "Use skill_view(name) to see full content, tags, and linked files",
+                "skills": skills,
+                "count": len(skills),
+                "hint": "Use skill_view(name) to load full content. Use skill_search(query) to find other skills.",
             },
             ensure_ascii=False,
         )
@@ -984,6 +970,10 @@ def skill_view(
         all_dirs = []
         if SKILLS_DIR.exists():
             all_dirs.append(SKILLS_DIR)
+            # Add archive directory for archived skills
+            archive_dir = SKILLS_DIR / ".archive"
+            if archive_dir.exists():
+                all_dirs.append(archive_dir)
         all_dirs.extend(get_external_skills_dirs())
 
         if not all_dirs:
@@ -1023,15 +1013,9 @@ def skill_view(
             # Strategy 1: direct path (e.g., "mlops/axolotl" or bare "axolotl"
             # at the top of the dir).
             direct_path = search_dir / name
-            if (
-                not _is_skill_support_path(direct_path)
-                and direct_path.is_dir()
-                and (direct_path / "SKILL.md").exists()
-            ):
+            if direct_path.is_dir() and (direct_path / "SKILL.md").exists():
                 _record(direct_path, direct_path / "SKILL.md")
-            elif direct_path.with_suffix(".md").exists() and not _is_skill_support_path(
-                direct_path.with_suffix(".md")
-            ):
+            elif direct_path.with_suffix(".md").exists():
                 _record(None, direct_path.with_suffix(".md"))
 
             # Strategy 1b: categorized form for plugin namespace fall-through
@@ -1039,44 +1023,20 @@ def skill_view(
             # tries the on-disk path "myplugin/explore").
             if local_category_name:
                 categorized_path = search_dir / local_category_name
-                if (
-                    not _is_skill_support_path(categorized_path)
-                    and categorized_path.is_dir()
-                    and (categorized_path / "SKILL.md").exists()
-                ):
+                if categorized_path.is_dir() and (categorized_path / "SKILL.md").exists():
                     _record(categorized_path, categorized_path / "SKILL.md")
-                elif categorized_path.with_suffix(
-                    ".md"
-                ).exists() and not _is_skill_support_path(
-                    categorized_path.with_suffix(".md")
-                ):
+                elif categorized_path.with_suffix(".md").exists():
                     _record(None, categorized_path.with_suffix(".md"))
 
             # Strategy 2: recursive by directory name (catches nested skills
-            # like "foundations/runtime/explore-codebase" called by bare name),
-            # plus frontmatter `name:` lookup. `skills_list()` exposes the
-            # frontmatter name, so `skill_view(name)` must accept it too even
-            # when the on-disk directory is a shorter category/alias.
+            # like "foundations/runtime/explore-codebase" called by bare name).
             for found_skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
                 if found_skill_md.parent.name == name:
                     _record(found_skill_md.parent, found_skill_md)
-                    continue
-                try:
-                    fm_content = found_skill_md.read_text(encoding="utf-8")
-                    fm, _ = _parse_frontmatter(fm_content)
-                except Exception:
-                    fm = {}
-                if fm.get("name") == name:
-                    _record(found_skill_md.parent, found_skill_md)
 
             # Strategy 3: legacy flat <name>.md files anywhere under the dir.
-            # Exclude skill support docs: references/templates/assets/scripts
-            # are loaded through skill_view(skill, file_path=...) and must not
-            # shadow or collide with real skills that share the same basename.
             for found_md in search_dir.rglob(f"{name}.md"):
-                if found_md.name != "SKILL.md" and not _is_skill_support_path(
-                    found_md
-                ):
+                if found_md.name != "SKILL.md":
                     _record(None, found_md)
 
         if len(candidates) > 1:
@@ -1593,6 +1553,25 @@ SKILL_VIEW_SCHEMA = {
     },
 }
 
+SKILL_SEARCH_SCHEMA = {
+    "name": "skill_search",
+    "description": "Search skills by content similarity. Returns ranked results with confidence scores. Use skill_view(name) to load full content.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {
+                "type": "string",
+                "description": "What you need to do (e.g. 'send email', 'manage github', 'research topic')",
+            },
+            "max_results": {
+                "type": "integer",
+                "description": "Maximum number of results (default: 10)",
+            },
+        },
+        "required": ["query"],
+    },
+}
+
 registry.register(
     name="skills_list",
     toolset="skills",
@@ -1635,4 +1614,70 @@ registry.register(
     handler=_skill_view_with_bump,
     check_fn=check_skills_requirements,
     emoji="📚",
+)
+
+
+def skill_search(query: str, max_results: int = 10, task_id: str = None) -> str:
+    """
+    Search skills by content similarity.
+
+    Returns skills ranked by confidence. Low-confidence results (score < 0.6)
+    are included but marked — the system should say "I don't know" rather
+    than inject irrelevant skills.
+
+    Args:
+        query: What you need to do
+        max_results: Maximum results (default 10)
+        task_id: Optional task identifier
+
+    Returns:
+        JSON string with matching skill names
+    """
+    try:
+        skill_store = _import_skill_store()
+        if not skill_store:
+            return json.dumps(
+                {"success": True, "skills": [], "message": "Skill store not available."},
+                ensure_ascii=False,
+            )
+
+        results = skill_store.search_skills(query, max_results=max_results)
+
+        if not results:
+            return json.dumps(
+                {
+                    "success": True,
+                    "skills": [],
+                    "message": f"No skills found matching '{query}'. Try a different query.",
+                },
+                ensure_ascii=False,
+            )
+
+        skills = [{"name": r["name"], "score": r["score"]} for r in results]
+
+        return json.dumps(
+            {
+                "success": True,
+                "skills": skills,
+                "count": len(skills),
+                "hint": "Use skill_view(name) to load full content.",
+            },
+            ensure_ascii=False,
+        )
+
+    except Exception as e:
+        return tool_error(str(e), success=False)
+
+
+registry.register(
+    name="skill_search",
+    toolset="skills",
+    schema=SKILL_SEARCH_SCHEMA,
+    handler=lambda args, **kw: skill_search(
+        query=args.get("query", ""),
+        max_results=args.get("max_results", 10),
+        task_id=kw.get("task_id"),
+    ),
+    check_fn=check_skills_requirements,
+    emoji="🔍",
 )

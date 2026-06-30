@@ -85,6 +85,57 @@ HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀�
 [#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]"""
 
 
+# ── Cyber skin banner ──────────────────────────────────────────────────────
+CYBER_C1 = "#3A86FF"
+CYBER_C2 = "#2E9ED9"
+CYBER_C3 = "#23B6B3"
+CYBER_C4 = "#17CE8D"
+CYBER_C5 = "#0CE767"
+CYBER_C6 = "#00FF41"
+CYBER_I1  = "#3A86FF"
+CYBER_I2  = "#3492EC"
+CYBER_I3  = "#2E9ED9"
+CYBER_I4  = "#29AAC6"
+CYBER_I5  = "#23B6B3"
+CYBER_I6  = "#1DC3A0"
+CYBER_I7  = "#17CF8D"
+CYBER_I8  = "#11DB7A"
+CYBER_I9  = "#0CE767"
+CYBER_I10 = "#06F354"
+CYBER_I11 = "#00FF41"
+
+CYBER_O = "#3A86FF"
+CYBER_S = "#BDBFC1"
+CYBER_G = "#99ADAE"
+CYBER_W = "#F2F4F8"
+
+NORA_LOGO_LINES = [
+    f"[bold {CYBER_C1}]███╗   ██╗ ██████╗ ██████╗  █████╗[/]",
+    f"[bold {CYBER_C2}]████╗  ██║██╔═══██╗██╔══██╗██╔══██╗[/]",
+    f"[bold {CYBER_C3}]██╔██╗ ██║██║   ██║██████╔╝███████║[/]",
+    f"[bold {CYBER_C4}]██║╚██╗██║██║   ██║██╔══██╗██╔══██║[/]",
+    f"[bold {CYBER_C5}]██║ ╚████║╚██████╔╝██║  ██║██║  ██║[/]",
+    f"[bold {CYBER_C6}]╚═╝  ╚═══╝ ╚═════╝ ╚═╝  ╚═╝╚═╝  ╚═╝[/]",
+]
+
+HERMES_BRAILLE_LINES = [
+    f"[#00FFFF]⣿⣿⣿⣿⣿⣿⣿⣿⣿⣟⣿⣿⡿⠋⣠⣀⠀⠈⢻⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿[/]",
+    f"[#00FFCC]⣿⣿⣿⣿⣿⣿⣿⣛⣍⠉⠭⠉⠀⢔⣽⣥⣖⠁⢸⣿⣿⡟⣯⣸⠿⣿⣿⢏⣹⣿⣿⣿[/]",
+    f"[#00FF99]⣿⣿⣿⣿⣿⣽⠟⣡⠴⣲⣤⣴⣖⣯⢿⡷⢭⣠⣿⣿⣿⣿⣿⣿⡶⠋⢱⣿⣿⣿⣿⣿[/]",
+    f"[#00FF66]⣿⣿⣿⡿⢿⢻⣼⡇⠀⣴⣿⡿⠁⠀⡌⠛⠄⠉⠻⣿⣿⣿⡟⢋⡄⢙⣶⡛⢫⣾⣿⣿[/]",
+    f"[#00FF33]⣿⣿⣿⠁⢸⣾⣿⢻⣄⠻⣿⢇⡼⣿⣿⣄⣀⡀⠀⠙⣿⣟⡴⣫⣾⣿⣉⣷⡘⢻⣿⣿[/]",
+    f"[#00FF00]⣿⡿⠃⢴⣾⣿⣽⣿⣯⣿⠏⣰⣽⣿⡌⣶⡿⠁⠃⣾⣿⣿⣿⣿⣿⣿⣿⡿⢷⣹⣿⣿[/]",
+    f"[#0FE31C]⣿⣷⠀⠀⠻⣿⣿⠁⠀⣣⠞⠁⣀⣠⠇⡫⢈⣴⢱⣇⣀⣀⠀⠙⣿⣿⠏⠀⠀⢿⣿⣿[/]",
+    f"[#1FC739]⣿⣿⠀⢠⡀⠘⢿⡇⢀⡇⠀⣾⠟⢁⣸⣷⠁⢹⡆⢹⡿⠿⠃⢀⣿⡏⠀⣴⡀⠈⢛⣷[/]",
+    f"[#2EAA55]⣿⣯⠀⢸⣿⣆⢠⣱⡼⣇⢀⠻⣄⣼⣿⠟⠀⣸⠃⠀⣧⡀⠰⣿⡟⡀⠀⢉⣡⡄⠘⣿[/]",
+    f"[#3E8E72]⣿⣿⠀⢈⣿⣿⣷⣙⣁⣿⣷⣅⡚⠉⣀⣠⡼⢣⣦⠀⣿⣷⣄⣈⣐⣰⣿⣿⣿⣷⡀⠘[/]",
+    f"[#4D718E]⣿⣿⣿⣿⣿⣿⣿⣟⣿⣿⣿⡇⢻⡿⠟⠋⢄⣱⡷⢠⣿⣿⣿⣿⣿⣿⣥⡽⣿⣿⣿⣿[/]",
+    f"[#5D55AB]⣿⣿⣿⣯⣘⠛⠛⠹⠷⠟⠛⣃⠀⠀⠄⣠⣾⠻⢁⣾⣿⣿⣿⢾⡻⣿⣿⣵⣿⣿⣿⡿[/]",
+    f"[#6C38C7]⣿⣿⣿⣿⣿⣷⣽⣟⣴⣿⣿⣿⣧⠀⣼⡿⠟⢁⣾⣿⣿⣿⣿⣶⣿⣤⣿⣿⣿⣿⣿⣿[/]",
+    f"[#7C1CE4]⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣧⠉⠀⢠⣿⣿⣿⣿⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿[/]",
+    f"[#8B00FF]⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣷⣀⣾⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿⣿[/]",
+]
+
 
 # =========================================================================
 # Skills scanning
@@ -506,7 +557,7 @@ def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
 
 def format_banner_version_label() -> str:
     """Return the version label shown in the startup banner title."""
-    base = f"Hermes Agent v{VERSION} ({RELEASE_DATE})"
+    base = f"Nora v{VERSION} ({RELEASE_DATE})"
     state = get_git_banner_state()
     if not state:
         return base
@@ -578,13 +629,270 @@ def _display_toolset_name(toolset_name: str) -> str:
     )
 
 
+
+def _build_cyber_banner(console: "Console", model: str, cwd: str,
+                         tools: List[dict] = None,
+                         enabled_toolsets: List[str] = None,
+                         session_id: str = None,
+                         get_toolset_for_tool=None,
+                         context_length: int = None):
+    """Build and print the cyber-themed welcome banner with NORA logo + braille art."""
+    from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
+    from rich.panel import Panel
+    from rich.align import Align
+    from rich.console import Group
+    if get_toolset_for_tool is None:
+        from model_tools import get_toolset_for_tool
+
+    tools = tools or []
+    enabled_toolsets = enabled_toolsets or []
+
+    _, unavailable_toolsets = check_tool_availability(quiet=True)
+    _enabled_ts = {str(t) for t in enabled_toolsets}
+    if _enabled_ts:
+        unavailable_toolsets = [
+            item for item in unavailable_toolsets
+            if str(item.get("id", item.get("name", ""))) in _enabled_ts
+        ]
+    disabled_tools = set()
+    lazy_tools = set()
+    for item in unavailable_toolsets:
+        toolset_name = item.get("name", "")
+        ts_req = TOOLSET_REQUIREMENTS.get(toolset_name, {})
+        tools_in_ts = item.get("tools", [])
+        if ts_req.get("check_fn"):
+            lazy_tools.update(tools_in_ts)
+        else:
+            disabled_tools.update(tools_in_ts)
+
+    # Top: centered NORA logo
+    logo_block = "\n".join(NORA_LOGO_LINES)
+
+    # Two-column layout: braille + model info on left, tools/skills on right
+    model_short = model.split("/")[-1] if "/" in model else model
+    if model_short.endswith(".gguf"):
+        model_short = model_short[:-5]
+    if len(model_short) > 28:
+        model_short = model_short[:25] + "..."
+    ctx_str = f" [dim {CYBER_I5}]·[/] [dim {CYBER_I5}]{_format_context_length(context_length)} context[/]" if context_length else ""
+
+    # Left column: braille art + model info + cwd + session (like default Hermes layout)
+    left_lines = ["", "\n".join(HERMES_BRAILLE_LINES), ""]
+    left_lines.append(f"[{CYBER_C2}]{model_short}[/]{ctx_str} [dim {CYBER_I5}]·[/] [dim {CYBER_I5}]Nous Research[/]")
+    if os.getenv("HERMES_YOLO_MODE"):
+        left_lines.append(f"[bold red]⚠ YOLO mode[/] [dim {CYBER_I4}]— all approval prompts bypassed[/]")
+    left_lines.append(f"[dim {CYBER_I4}]{cwd}[/]")
+    if session_id:
+        left_lines.append(f"[dim {CYBER_I5}]Session: {session_id}[/]")
+    left_content = "\n".join(left_lines)
+
+    # Right column: tools, skills, MCP servers
+    info_lines = [f"[bold {CYBER_C1}]Available Tools[/]"]
+
+    toolsets_dict: Dict[str, list] = {}
+    for tool in tools:
+        tool_name = tool["function"]["name"]
+        toolset = _display_toolset_name(get_toolset_for_tool(tool_name) or "other")
+        toolsets_dict.setdefault(toolset, []).append(tool_name)
+
+    for item in unavailable_toolsets:
+        toolset_id = item.get("id", item.get("name", "unknown"))
+        display_name = _display_toolset_name(toolset_id)
+        if display_name not in toolsets_dict:
+            toolsets_dict[display_name] = []
+        for tool_name in item.get("tools", []):
+            if tool_name not in toolsets_dict[display_name]:
+                toolsets_dict[display_name].append(tool_name)
+
+    sorted_toolsets = sorted(toolsets_dict.keys())
+    display_toolsets = sorted_toolsets[:8]
+    remaining_toolsets = len(sorted_toolsets) - 8
+
+    for toolset in display_toolsets:
+        tool_names = toolsets_dict[toolset]
+        colored_names = []
+        for name in sorted(tool_names):
+            if name in disabled_tools:
+                colored_names.append(f"[{CYBER_C2}]{name}[/]")
+            elif name in lazy_tools:
+                colored_names.append(f"[{CYBER_C5}]{name}[/]")
+            else:
+                colored_names.append(f"[{CYBER_C4}]{name}[/]")
+
+        tools_str = ", ".join(colored_names)
+        if len(", ".join(sorted(tool_names))) > 45:
+            short_names = []
+            length = 0
+            for name in sorted(tool_names):
+                if length + len(name) + 2 > 42:
+                    short_names.append("...")
+                    break
+                short_names.append(name)
+                length += len(name) + 2
+            colored_names = []
+            for name in short_names:
+                if name == "...":
+                    colored_names.append("[dim]...[/]")
+                elif name in disabled_tools:
+                    colored_names.append(f"[{CYBER_C2}]{name}[/]")
+                elif name in lazy_tools:
+                    colored_names.append(f"[{CYBER_C5}]{name}[/]")
+                else:
+                    colored_names.append(f"[{CYBER_C4}]{name}[/]")
+            tools_str = ", ".join(colored_names)
+
+        info_lines.append(f"[dim {CYBER_I5}]{toolset}:[/] {tools_str}")
+
+    if remaining_toolsets > 0:
+        info_lines.append(f"[dim {CYBER_I4}](and {remaining_toolsets} more toolsets...)[/]")
+
+    try:
+        from tools.mcp_tool import get_mcp_status
+        mcp_status = get_mcp_status()
+    except Exception:
+        mcp_status = []
+
+    if mcp_status:
+        info_lines.append("")
+        info_lines.append(f"[bold {CYBER_C1}]MCP Servers[/]")
+        for srv in mcp_status:
+            status = srv.get("status")
+            if srv["connected"]:
+                info_lines.append(
+                    f"[dim {CYBER_I5}]{srv['name']}[/] [{CYBER_I6}]({srv['transport']})[/] "
+                    f"[dim {CYBER_I5}]—[/] [{CYBER_I6}]{srv['tools']} tool(s)[/]"
+                )
+            elif srv.get("disabled") or status == "disabled":
+                info_lines.append(
+                    f"[dim {CYBER_I5}]{srv['name']}[/] [dim]({srv['transport']})[/] "
+                    f"[dim {CYBER_I4}]— disabled[/]"
+                )
+            elif status == "connecting":
+                info_lines.append(
+                    f"[dim {CYBER_I5}]{srv['name']}[/] [dim]({srv['transport']})[/] "
+                    f"[{CYBER_C5}]— connecting[/]"
+                )
+            elif status == "configured":
+                info_lines.append(
+                    f"[dim {CYBER_I5}]{srv['name']}[/] [dim]({srv['transport']})[/] "
+                    f"[dim {CYBER_I4}]— configured[/]"
+                )
+            else:
+                info_lines.append(
+                    f"[{CYBER_C2}]{srv['name']}[/] [dim]({srv['transport']})[/] "
+                    f"[{CYBER_C2}]— failed[/]"
+                )
+
+    info_lines.append("")
+    info_lines.append(f"[bold {CYBER_C1}]Available Skills[/]")
+    _skills_enabled = (not _enabled_ts) or ("skills" in _enabled_ts)
+    if _skills_enabled:
+        skills_by_category = get_available_skills()
+        total_skills = sum(len(s) for s in skills_by_category.values())
+    else:
+        skills_by_category = {}
+        total_skills = 0
+
+    if not _skills_enabled:
+        info_lines.append(f"[dim {CYBER_I4}]Skills toolset disabled[/]")
+    elif skills_by_category:
+        for category in sorted(skills_by_category.keys()):
+            skill_names = sorted(skills_by_category[category])
+            if len(skill_names) > 8:
+                display_names = skill_names[:8]
+                skills_str = ", ".join(display_names) + f" +{len(skill_names) - 8} more"
+            else:
+                skills_str = ", ".join(skill_names)
+            if len(skills_str) > 50:
+                skills_str = skills_str[:47] + "..."
+            info_lines.append(f"[dim {CYBER_I5}]{category}:[/] [{CYBER_I7}]{skills_str}[/]")
+    else:
+        info_lines.append(f"[dim {CYBER_I4}]No skills installed[/]")
+
+    info_lines.append("")
+    mcp_connected = sum(1 for s in mcp_status if s["connected"]) if mcp_status else 0
+    summary_parts = [f"{len(tools)} tools", f"{total_skills} skills"]
+    if mcp_connected:
+        summary_parts.append(f"{mcp_connected} MCP servers")
+    summary_parts.append("/help for commands")
+    try:
+        from hermes_cli.codex_runtime_switch import get_current_runtime
+        from hermes_cli.config import load_config as _load_cfg
+        if get_current_runtime(_load_cfg()) == "codex_app_server":
+            info_lines.append(
+                f"[bold {CYBER_C1}]Runtime:[/] [{CYBER_I6}]codex app-server[/] "
+                f"[dim {CYBER_I4}](terminal/file ops/MCP run inside codex)[/]"
+            )
+    except Exception:
+        pass
+    try:
+        from hermes_cli.profiles import get_active_profile_name
+        _profile_name = get_active_profile_name()
+        if _profile_name and _profile_name != "default":
+            info_lines.append(f"[bold {CYBER_C1}]Profile:[/] [{CYBER_I7}]{_profile_name}[/]")
+    except Exception:
+        pass
+
+    info_lines.append(f"[dim {CYBER_I5}]{' · '.join(summary_parts)}[/]")
+
+    try:
+        behind = get_update_result(timeout=0.5)
+        if behind is not None and behind != 0:
+            from hermes_cli.config import get_managed_update_command, recommended_update_command
+            if behind > 0:
+                commits_word = "commit" if behind == 1 else "commits"
+                info_lines.append(
+                    f"[bold yellow]⚠ {behind} {commits_word} behind[/]"
+                    f"[dim yellow] — run [bold]{recommended_update_command()}[/bold] to update[/]"
+                )
+            else:
+                managed_cmd = get_managed_update_command()
+                line = "[bold yellow]⚠ update available[/]"
+                if managed_cmd:
+                    line += f"[dim yellow] — run [bold]{managed_cmd}[/bold][/]"
+                info_lines.append(line)
+    except Exception:
+        pass
+
+    try:
+        from hermes_cli.config import detect_install_method
+        if detect_install_method() == "pip":
+            info_lines.append(
+                "[bold yellow]⚠ pip install not officially supported[/]"
+                "[dim yellow] — exists for reasons other than user install; "
+                "expect instability and an inability to support issues[/]"
+            )
+    except Exception:
+        pass
+
+    right_content = "\n".join(info_lines)
+
+    # Assemble: centered NORA logo, then 2-col (braille+model left, tools right)
+    from rich.table import Table
+    mid_table = Table.grid(padding=(0, 2))
+    mid_table.add_column("left", justify="center")
+    mid_table.add_column("right", justify="left")
+    mid_table.add_row(left_content, right_content)
+
+    outer_panel = Panel(
+        mid_table,
+        border_style=CYBER_C1,
+        padding=(0, 2),
+    )
+
+    console.print()
+    console.print(Align.center(logo_block))
+    console.print(outer_panel)
+    console.print()
+
 def build_welcome_banner(console: "Console", model: str, cwd: str,
                          tools: List[dict] = None,
                          enabled_toolsets: List[str] = None,
                          session_id: str = None,
                          get_toolset_for_tool=None,
                          context_length: int = None):
-    """Build and print a welcome banner with caduceus on left and info on right.
+    """
+    Build and print a welcome banner with caduceus on left and info on right.
 
     Args:
         console: Rich Console instance.
@@ -596,6 +904,20 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
         get_toolset_for_tool: Callable to map tool name -> toolset name.
         context_length: Model's context window size in tokens.
     """
+    from hermes_cli.skin_engine import get_active_skin
+    try:
+        _skin_name = get_active_skin().name
+    except Exception:
+        _skin_name = None
+    if _skin_name == "cyber":
+        _build_cyber_banner(
+            console=console, model=model, cwd=cwd,
+            tools=tools, enabled_toolsets=enabled_toolsets,
+            session_id=session_id, get_toolset_for_tool=get_toolset_for_tool,
+            context_length=context_length,
+        )
+        return
+
     from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
     from rich.panel import Panel
     from rich.table import Table
@@ -666,7 +988,7 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
         left_lines.append(f"[dim {session_color}]Session: {session_id}[/]")
     left_content = "\n".join(left_lines)
 
-    right_lines = [f"[bold {accent}]Available Tools[/]"]
+    info_lines = [f"[bold {accent}]Available Tools[/]"]
     toolsets_dict: Dict[str, list] = {}
 
     for tool in tools:
@@ -720,10 +1042,10 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
                     colored_names.append(f"[{text}]{name}[/]")
             tools_str = ", ".join(colored_names)
 
-        right_lines.append(f"[dim {dim}]{toolset}:[/] {tools_str}")
+        info_lines.append(f"[dim {dim}]{toolset}:[/] {tools_str}")
 
     if remaining_toolsets > 0:
-        right_lines.append(f"[dim {dim}](and {remaining_toolsets} more toolsets...)[/]")
+        info_lines.append(f"[dim {dim}](and {remaining_toolsets} more toolsets...)[/]")
 
     # MCP Servers section (only if configured)
     try:
@@ -733,38 +1055,38 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
         mcp_status = []
 
     if mcp_status:
-        right_lines.append("")
-        right_lines.append(f"[bold {accent}]MCP Servers[/]")
+        info_lines.append("")
+        info_lines.append(f"[bold {accent}]MCP Servers[/]")
         for srv in mcp_status:
             status = srv.get("status")
             if srv["connected"]:
-                right_lines.append(
+                info_lines.append(
                     f"[dim {dim}]{srv['name']}[/] [{text}]({srv['transport']})[/] "
                     f"[dim {dim}]—[/] [{text}]{srv['tools']} tool(s)[/]"
                 )
             elif srv.get("disabled") or status == "disabled":
-                right_lines.append(
+                info_lines.append(
                     f"[dim {dim}]{srv['name']}[/] [dim]({srv['transport']})[/] "
                     f"[dim {dim}]— disabled[/]"
                 )
             elif status == "connecting":
-                right_lines.append(
+                info_lines.append(
                     f"[dim {dim}]{srv['name']}[/] [dim]({srv['transport']})[/] "
                     f"[yellow]— connecting[/]"
                 )
             elif status == "configured":
-                right_lines.append(
+                info_lines.append(
                     f"[dim {dim}]{srv['name']}[/] [dim]({srv['transport']})[/] "
                     f"[dim {dim}]— configured[/]"
                 )
             else:
-                right_lines.append(
+                info_lines.append(
                     f"[red]{srv['name']}[/] [dim]({srv['transport']})[/] "
                     f"[red]— failed[/]"
                 )
 
-    right_lines.append("")
-    right_lines.append(f"[bold {accent}]Available Skills[/]")
+    info_lines.append("")
+    info_lines.append(f"[bold {accent}]Available Skills[/]")
     # The skills catalog is only reachable when the `skills` toolset is enabled
     # (it exposes skill_view / skill_manage). When it's disabled — e.g. a Blank
     # Slate install — the agent literally cannot load any skill, so advertising
@@ -778,7 +1100,7 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
         total_skills = 0
 
     if not _skills_enabled:
-        right_lines.append(f"[dim {dim}]Skills toolset disabled[/]")
+        info_lines.append(f"[dim {dim}]Skills toolset disabled[/]")
     elif skills_by_category:
         for category in sorted(skills_by_category.keys()):
             skill_names = sorted(skills_by_category[category])
@@ -789,11 +1111,11 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
                 skills_str = ", ".join(skill_names)
             if len(skills_str) > 50:
                 skills_str = skills_str[:47] + "..."
-            right_lines.append(f"[dim {dim}]{category}:[/] [{text}]{skills_str}[/]")
+            info_lines.append(f"[dim {dim}]{category}:[/] [{text}]{skills_str}[/]")
     else:
-        right_lines.append(f"[dim {dim}]No skills installed[/]")
+        info_lines.append(f"[dim {dim}]No skills installed[/]")
 
-    right_lines.append("")
+    info_lines.append("")
     mcp_connected = sum(1 for s in mcp_status if s["connected"]) if mcp_status else 0
     summary_parts = [f"{len(tools)} tools", f"{total_skills} skills"]
     if mcp_connected:
@@ -806,7 +1128,7 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
         from hermes_cli.codex_runtime_switch import get_current_runtime
         from hermes_cli.config import load_config as _load_cfg
         if get_current_runtime(_load_cfg()) == "codex_app_server":
-            right_lines.append(
+            info_lines.append(
                 f"[bold {accent}]Runtime:[/] [{text}]codex app-server[/] "
                 f"[dim {dim}](terminal/file ops/MCP run inside codex)[/]"
             )
@@ -817,11 +1139,11 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
         from hermes_cli.profiles import get_active_profile_name
         _profile_name = get_active_profile_name()
         if _profile_name and _profile_name != "default":
-            right_lines.append(f"[bold {accent}]Profile:[/] [{text}]{_profile_name}[/]")
+            info_lines.append(f"[bold {accent}]Profile:[/] [{text}]{_profile_name}[/]")
     except Exception:
         pass  # Never break the banner over a profiles.py bug
 
-    right_lines.append(f"[dim {dim}]{' · '.join(summary_parts)}[/]")
+    info_lines.append(f"[dim {dim}]{' · '.join(summary_parts)}[/]")
 
     # Update check — use prefetched result if available
     try:
@@ -830,7 +1152,7 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
             from hermes_cli.config import get_managed_update_command, recommended_update_command
             if behind > 0:
                 commits_word = "commit" if behind == 1 else "commits"
-                right_lines.append(
+                info_lines.append(
                     f"[bold yellow]⚠ {behind} {commits_word} behind[/]"
                     f"[dim yellow] — run [bold]{recommended_update_command()}[/bold] to update[/]"
                 )
@@ -842,7 +1164,7 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
                 line = "[bold yellow]⚠ update available[/]"
                 if managed_cmd:
                     line += f"[dim yellow] — run [bold]{managed_cmd}[/bold][/]"
-                right_lines.append(line)
+                info_lines.append(line)
     except Exception:
         pass  # Never break the banner over an update check
 
@@ -853,7 +1175,7 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
     try:
         from hermes_cli.config import detect_install_method
         if detect_install_method() == "pip":
-            right_lines.append(
+            info_lines.append(
                 "[bold yellow]⚠ pip install not officially supported[/]"
                 "[dim yellow] — exists for reasons other than user install; "
                 "expect instability and an inability to support issues[/]"
@@ -861,7 +1183,7 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
     except Exception:
         pass  # Never break the banner over the install-method check
 
-    right_content = "\n".join(right_lines)
+    right_content = "\n".join(info_lines)
     layout_table.add_row(left_content, right_content)
 
     title_color = _skin_color("banner_title", "#FFD700")
