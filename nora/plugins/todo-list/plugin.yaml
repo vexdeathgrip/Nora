@@ -1,0 +1,5 @@
+name: todo-list
+version: 1.0.0
+description: "Your personal task list. Create tasks, complete them when done, or execute them immediately. The list is always visible in your context so you know what's pending."
+tools:
+  - todo_list

@@ -1,0 +1,13 @@
+[Unit]
+Description=Llama.cpp Server (qwen-pro)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/home/vexdeathgrip/llama.cpp/build/bin/llama-server -m /home/vexdeathgrip/AI/models/Qwen-uc.gguf -c 110000 -ngl 99 -fa on --port 11434 --host 127.0.0.1 --alias qwen-pro -b 1024 -ub 1024 --cache-type-k turbo4 --cache-type-v turbo4 --swa-full --ctx-checkpoints 32 -np 1 --jinja --sleep-idle-seconds 300 --temp 0.7 --top-k 0 --min-p 0.1
+Restart=on-failure
+RestartSec=5
+Environment=HOME=/home/vexdeathgrip
+
+[Install]
+WantedBy=default.target

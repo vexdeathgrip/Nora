@@ -1,0 +1,7 @@
+name: vector-context
+version: 1.0.0
+description: "ChromaDB vector store for conversation memory retrieval and centralized session storage."
+hooks:
+  - pre_llm_call
+  - post_llm_call
+  - on_session_finalize

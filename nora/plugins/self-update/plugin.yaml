@@ -1,0 +1,6 @@
+name: self-update
+version: 1.0.0
+description: Nora's self-section management tool
+author: Nora
+provides_tools:
+  - self_update

@@ -2705,6 +2705,10 @@ def _run_portal_one_shot(config: dict) -> None:
     print_info("  Run `hermes portal info` to inspect routing.")
     print_info("  Run `hermes` to start chatting.")
 
+    # Nora setup
+    from hermes_constants import get_hermes_home
+    _run_nora_setup(get_hermes_home())
+
 
 def run_setup_wizard(args):
     """Run the interactive setup wizard.
@@ -2940,6 +2944,9 @@ def run_setup_wizard(args):
         print_info(f"  cp {_backup_path} {config_path}")
     _print_setup_summary(config, hermes_home)
 
+    # Nora setup
+    _run_nora_setup(hermes_home)
+
 
 def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
     """Streamlined first-time setup via Nous Portal: OAuth, model, terminal & messaging.
@@ -3012,6 +3019,9 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
     print()
 
     _print_setup_summary(config, hermes_home)
+
+    # Nora setup
+    _run_nora_setup(hermes_home)
 
 
 def _blank_slate_minimal_toolsets(config: dict):
@@ -3156,6 +3166,7 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
         print_info("  Tune agent settings: hermes setup agent")
         print()
         _print_setup_summary(config, hermes_home)
+        _run_nora_setup(hermes_home)
         return
 
     # ── Walkthrough path — opt in to each capability ──
@@ -3243,6 +3254,7 @@ def _blank_slate_walkthrough(config: dict, hermes_home):
     print()
 
     _print_setup_summary(config, hermes_home)
+    _run_nora_setup(hermes_home)
 
 
 def _run_quick_setup(config: dict, hermes_home):
@@ -3409,3 +3421,32 @@ def _run_quick_setup(config: dict, hermes_home):
 
     # Jump to summary
     _print_setup_summary(config, hermes_home)
+    _run_nora_setup(hermes_home)
+
+
+def _run_nora_setup(hermes_home) -> None:
+    """Install Nora's plugins, skills, and config if nora/ directory exists."""
+    from hermes_constants import get_hermes_home
+
+    nora_dir = Path(__file__).parent.parent / "nora"
+    if not nora_dir.exists():
+        return
+
+    try:
+        from nora.setup import setup_nora
+    except ImportError:
+        return
+
+    print()
+    print_header("Nora Setup")
+    print_info("Installing Nora's plugins, skills, and config...")
+
+    try:
+        result = setup_nora(get_hermes_home())
+        for item in result.get("installed", []):
+            print_success(f"  Installed {item}")
+        for item in result.get("skipped", []):
+            print_info(f"  Skipped {item} (already exists)")
+    except Exception as exc:
+        print_warning(f"Nora setup encountered an error: {exc}")
+        print_info("You can try again later with: hermes setup")
