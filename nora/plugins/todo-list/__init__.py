@@ -341,6 +341,11 @@ def todo_list_handler(args: Dict[str, Any], **kwargs) -> str:
         return json.dumps({"error": f"Unknown action: {action}"})
 
 
+def _clear_todos():
+    """Clear all todos (session-scoped)."""
+    _get_todo_file().write_text("[]")
+
+
 def register(ctx):
     ctx.register_tool(
         name="todo_list",
@@ -350,4 +355,6 @@ def register(ctx):
         description="Task management",
         emoji="✅",
     )
+    # Clear todos at session start — tasks are session-scoped
+    ctx.register_hook("on_session_start", lambda: _clear_todos())
     logger.info("Todo-list plugin registered")
