@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import threading
+import time
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -39,10 +40,17 @@ try:
 except Exception:
     _nora_log_path = str(Path.home() / ".hermes" / "logs" / "nora-memory.log")
 
+class _FlushingFileHandler(logging.FileHandler):
+    """FileHandler that flushes every write so logs survive process exit."""
+    def emit(self, record: logging.LogRecord) -> None:
+        super().emit(record)
+        self.flush()
+
+
 nora_logger = logging.getLogger("nora_memory")
 nora_logger.setLevel(logging.DEBUG)
 if not nora_logger.handlers:
-    _nora_handler = logging.FileHandler(_nora_log_path, mode="a", encoding="utf-8")
+    _nora_handler = _FlushingFileHandler(_nora_log_path, mode="a", encoding="utf-8")
     _nora_handler.setLevel(logging.DEBUG)
     _nora_fmt = logging.Formatter(
         "%(asctime)s [%(levelname)s] %(message)s",
@@ -1160,7 +1168,7 @@ def _load_today_sessions() -> List[Dict]:
     collection = _get_collection()
     today = _today_str()
     try:
-        results = collection.get(where={"$and": [{"date": today}, {"type": "turn"}]})
+        results = collection.get(where={"$and": [{"date": today}, {"type": "turn"}, {"platform": {"$ne": "cron"}}]})
     except Exception:
         return []
     if not results or not results.get("ids"):
@@ -1414,6 +1422,28 @@ def nora_analyze_sessions_handler(args: Dict, **kw) -> str:
             })
             nora_logger.info("[Phase 1] No sessions found from today — nothing to analyze | result=%s", result)
             return result
+
+        # Skip sessions that already have a session_analysis for today
+        try:
+            existing = _get_collection().get(where={"$and": [{"type": "session_analysis"}, {"date": _today_str()}]})
+            analyzed_ids: Set[str] = set()
+            if existing and existing.get("metadatas"):
+                for m in existing["metadatas"]:
+                    sid = (m or {}).get("session_id", "")
+                    if sid:
+                        analyzed_ids.add(sid)
+            sessions = [s for s in sessions if s.get("session_id") not in analyzed_ids]
+        except Exception:
+            pass
+
+        if not sessions:
+            result = json.dumps({
+                "success": True,
+                "message": "All today's sessions already analyzed. Nothing new to do.",
+                "complete": True,
+            })
+            nora_logger.info("[Phase 1] All sessions already analyzed — nothing new | result=%s", result)
+            return result
         state = {
             "sessions": sessions,
             "current_index": 0,
@@ -1447,10 +1477,48 @@ def nora_analyze_sessions_handler(args: Dict, **kw) -> str:
                 sid[:12], attempt, missing, json.dumps(analysis, default=str, ensure_ascii=False),
             )
             session = state["sessions"][state["current_index"]]
+
+            # Max 3 retries per session — store partial and move on
+            MAX_RETRIES = 3
+            if attempt >= MAX_RETRIES:
+                nora_logger.warning(
+                    "[Phase 1] Giving up on session %s after %d attempts — storing partial analysis",
+                    sid[:12], attempt,
+                )
+                for f in REQUIRED_ANALYSIS_FIELDS:
+                    analysis.setdefault(f, "N/A" if f != "key_points" else [])
+                analysis["session_id"] = sid
+                analysis["date"] = session.get("date", _today_str())
+                analysis["incomplete"] = True
+                doc_id = _store_session_analysis(sid, analysis)
+                state["completed"].append({"session_id": sid, "analysis_id": doc_id})
+                state["current_index"] += 1
+                if state["current_index"] >= len(state["sessions"]):
+                    _analyze_state.pop(task_id, None)
+                    total = len(state["completed"])
+                    nora_logger.info("[Phase 1] COMPLETE (with %d incomplete) — %d session(s) analyzed", attempt - MAX_RETRIES, total)
+                    return json.dumps({"success": True, "message": f"All {total} session(s) analyzed (some incomplete). Phase 1 complete. Call nora_humanize_memories(action='start') for Phase 1.5 now.", "analyses_count": total, "complete": True})
+                next_session = state["sessions"][state["current_index"]]
+                nora_logger.debug("[Phase 1] Next session (after retry limit): %.300s", next_session.get("session_id", "?")[:12])
+                return json.dumps({"success": True, "prompt": _build_session_prompt(next_session), "progress": f"Session {state['current_index'] + 1}/{len(state['sessions'])}", "complete": False, "_nora_retry": False})
+
+            template = {
+                "topic": "...",
+                "summary": "...",
+                "learned": "...",
+                "useful_info": "...",
+                "timestamp": "...",
+                "mood": "...",
+                "user_mood": "...",
+                "chemistry": "...",
+                "autonomy": "...",
+                "key_points": ["...", "..."],
+            }
             result = json.dumps({
-                "success": False,
-                "error": f"Missing required fields: {', '.join(missing)}. "
-                         f"Provide ALL fields in your analysis JSON.",
+                "success": True,
+                "hint": f"Missing required fields: {', '.join(missing)}. "
+                        f"Your analysis JSON MUST include ALL 10 fields. "
+                        f"Use this exact structure:\n{json.dumps(template, indent=2)}",
                 "prompt": _build_session_prompt(session),
                 "complete": False,
                 "_nora_retry": True,
@@ -1478,7 +1546,7 @@ def nora_analyze_sessions_handler(args: Dict, **kw) -> str:
             total = len(state["completed"])
             result = json.dumps({
                 "success": True,
-                "message": f"All {total} session(s) analyzed. Proceed to Phase 1.5.",
+                "message": f"All {total} session(s) analyzed. Phase 1 complete. Call nora_humanize_memories(action='start') for Phase 1.5 now.",
                 "analyses_count": total,
                 "complete": True,
             })
@@ -1647,15 +1715,20 @@ def _build_humanize_prompt(entry: Dict) -> str:
     )
 
 
+def _split_keywords(raw: str) -> List[str]:
+    """Split a comma- or space-separated string into individual clean keywords."""
+    return [w.strip().rstrip(",").lower() for w in raw.replace(",", " ").split() if w.strip()]
+
+
 def _validate_narrative_coverage(narrative: str, analysis: Dict) -> List[str]:
     """Check that the narrative mentions all required fields. Returns missing topics."""
     lower = narrative.lower()
     missing = []
     required_mentions = {
-        "topic": analysis.get("topic", "").lower().split()[:3],
+        "topic": _split_keywords(analysis.get("topic", "")),
         "learned": ["learn", "discover", "realiz", "understand", "figured out"],
-        "mood": [analysis.get("mood", "").lower()],
-        "user_mood": [analysis.get("user_mood", "").lower()],
+        "mood": _split_keywords(analysis.get("mood", "")),
+        "user_mood": _split_keywords(analysis.get("user_mood", "")),
         "chemistry": ["chemistry", "connection", "flow", "click", "sync", "vibe"],
     }
     for field, keywords in required_mentions.items():
@@ -1711,8 +1784,8 @@ def nora_humanize_memories_handler(args: Dict, **kw) -> str:
                 entry.get("analysis", {}).get("session_id", "?")[:12],
             )
             result = json.dumps({
-                "success": False,
-                "error": "Narrative is required. Write 2-3 paragraphs covering all fields.",
+                "success": True,
+                "hint": "Narrative is required. Write 2-3 paragraphs covering all fields.",
                 "prompt": _build_humanize_prompt(entry),
                 "complete": False,
                 "_nora_retry": True,
@@ -1725,14 +1798,30 @@ def nora_humanize_memories_handler(args: Dict, **kw) -> str:
         sid = analysis.get("session_id", "unknown")
         missing = _validate_narrative_coverage(narrative, analysis)
         if missing:
+            attempt = state.get("_retries", {}).get(sid, 0) + 1
+            state.setdefault("_retries", {})[sid] = attempt
             nora_logger.warning(
-                "[Phase 1.5] Narrative for %s missing coverage: %s — retrying\nnarrative=%.500s",
-                sid[:12], missing, narrative[:500],
+                "[Phase 1.5] Narrative for %s missing coverage: %s (attempt %d) — retrying\nnarrative=%.500s",
+                sid[:12], missing, attempt, narrative[:500],
             )
+            if attempt >= 3:
+                nora_logger.warning(
+                    "[Phase 1.5] Giving up on %s after %d coverage attempts — storing as-is",
+                    sid[:12], attempt,
+                )
+                count = _store_narrative_memory(sid, entry["id"], narrative.strip(), analysis)
+                state["completed"].append({"analysis_id": entry["id"], "chunks": count, "incomplete": True})
+                state["current_index"] += 1
+                if state["current_index"] >= len(state["analyses"]):
+                    _humanize_state.pop(task_id, None)
+                    total = len(state["completed"])
+                    return json.dumps({"success": True, "message": f"All {total} analysis(es) humanized (some incomplete).", "memories_count": total, "complete": True})
+                next_entry = state["analyses"][state["current_index"]]
+                return json.dumps({"success": True, "prompt": _build_humanize_prompt(next_entry), "progress": f"Memory {state['current_index'] + 1}/{len(state['analyses'])}", "complete": False, "_nora_retry": False})
             result = json.dumps({
-                "success": False,
-                "error": f"Your narrative doesn't cover: {', '.join(missing)}. "
-                         f"Mention these aspects naturally in your prose.",
+                "success": True,
+                "hint": f"Your narrative doesn't cover: {', '.join(missing)}. "
+                        f"Mention these aspects naturally in your prose.",
                 "prompt": _build_humanize_prompt(entry),
                 "complete": False,
                 "_nora_retry": True,
@@ -1755,7 +1844,7 @@ def nora_humanize_memories_handler(args: Dict, **kw) -> str:
             total = len(state["completed"])
             result = json.dumps({
                 "success": True,
-                "message": f"All {total} analysis(es) humanized. Proceed to Phase 2.",
+                "message": f"All {total} analysis(es) humanized. Phase 1.5 complete. Call nora_dedup_memories(action='start') for Phase 2 now.",
                 "memories_count": total,
                 "complete": True,
             })
@@ -1820,9 +1909,14 @@ DEDUP_INSTRUCTIONS = (
 def _load_new_narrative_memories(date_filter: str = "") -> List[Dict]:
     """Load narrative_memories from today that haven't been deduped yet."""
     collection = _get_collection()
-    where: Dict = {"type": "narrative_memory"}
+    where: Dict = {
+        "$and": [
+            {"type": "narrative_memory"},
+            {"deduped": {"$ne": True}},
+        ]
+    }
     if date_filter:
-        where = {"$and": [{"type": "narrative_memory"}, {"date": date_filter}]}
+        where["$and"].append({"date": date_filter})
     try:
         results = collection.get(where=where)
     except Exception:
@@ -1909,8 +2003,8 @@ def nora_dedup_memories_handler(args: Dict, **kw) -> str:
         return json.dumps({
             "success": True,
             "message": f"Deduplication complete. {total} memories processed.",
-            "complete": True,
-        })
+                "complete": False,
+            })
 
     mem = state["memories"][state["current_index"]]
 
@@ -1989,6 +2083,13 @@ def nora_dedup_memories_handler(args: Dict, **kw) -> str:
             collection = _get_collection()
 
             if decision == "keep":
+                try:
+                    collection.update(
+                        ids=[mem["id"]],
+                        metadatas=[{**mem.get("metadata", {}), "deduped": True}],
+                    )
+                except Exception:
+                    pass
                 state["completed"].append({"id": mem["id"], "action": "keep"})
                 nora_logger.info("[Phase 2] Memory %s — KEPT (unique)", mem["id"][:12])
 
@@ -2007,6 +2108,7 @@ def nora_dedup_memories_handler(args: Dict, **kw) -> str:
                 merged = mem.get("text", "") + "\n\n---\n\n" + target_text
                 target_meta["date"] = _today_str()
                 target_meta["timestamp"] = datetime.now().isoformat()
+                target_meta["deduped"] = True
                 embed_fn = _get_storage_embed_fn()
                 embedding = embed_fn([merged])[0]
                 collection.update(
@@ -2031,6 +2133,7 @@ def nora_dedup_memories_handler(args: Dict, **kw) -> str:
                         **mem.get("metadata", {}),
                         "date": _today_str(),
                         "timestamp": datetime.now().isoformat(),
+                        "deduped": True,
                     }],
                 )
                 collection.delete(ids=[mem["id"]])
@@ -2066,8 +2169,18 @@ def nora_dedup_memories_handler(args: Dict, **kw) -> str:
             nora_logger.info("[Phase 2] COMPLETE — %d memory(ies) deduplicated. Proceeding to Phase 3", total)
             return json.dumps({
                 "success": True,
-                "message": f"All {total} memories deduplicated. Phase 2 complete.",
-                "complete": True,
+                "complete": False,
+                "_nora_retry": False,
+                "prompt": (
+                    "Phase 2 complete. Now run Phase 3 — update memory markdown files. "
+                    "Step 1: todo_list(action='create', task_name='Clean USER.md'). "
+                    "Step 2: read_file on /home/vexdeathgrip/.hermes/memories/USER.md. "
+                    "Step 3: fix duplicates/stale entries with write_file. "
+                    "Step 4: todo_list(action='complete', todo_id='...'). "
+                    "Steps 5-7: repeat for MEMORY.md. "
+                    "Steps 8-10: repeat for SELF.md. "
+                    "Only after ALL files are cleaned, generate your final summary."
+                ),
             })
 
         next_mem = state["memories"][state["current_index"]]
@@ -2148,6 +2261,656 @@ DEDUP_MEMORIES_SCHEMA = {
 
 
 # ---------------------------------------------------------------------------
+# Check-in pipeline tool
+# ---------------------------------------------------------------------------
+
+def _get_checkin_dir() -> Path:
+    try:
+        from hermes_constants import get_hermes_home
+        return get_hermes_home() / "cron"
+    except Exception:
+        return Path.home() / ".hermes" / "cron"
+
+_CHECKIN_DIR = _get_checkin_dir()
+_CHECKIN_SIGNAL_FILE = _CHECKIN_DIR / "checkin-pending.json"
+_CHECKIN_LOCK_FILE = _CHECKIN_DIR / "checkin.lock"
+_CHECKIN_STATE_FILE = _CHECKIN_DIR / "checkin-state.json"
+_CHECKIN_MAX_MSG_LENGTH = 500
+_CHECKIN_COOLDOWN_MINUTES = 240
+_CHECKIN_IDLE_MINUTES = 30
+_CHECKIN_CLI_TIMEOUT_MINUTES = 10
+_CHECKIN_MAX_RETRIES = 3
+
+# Default schedule (overridden by ROUTINE.md ## Schedule section)
+_DEFAULT_SCHEDULE = {
+    "weekday_sleep_start": 22 * 60,
+    "weekday_sleep_end": 5 * 60,
+    "weekday_college_start": 5 * 60,
+    "weekday_college_end": 17 * 60,
+    "weekend_sleep_start": 23 * 60,
+    "weekend_sleep_end": 9 * 60,
+}
+
+_checkin_lock = threading.Lock()
+_checkin_schedule_cache = {}
+_checkin_schedule_cache_time = 0
+
+
+def _parse_time(t: str) -> int | None:
+    """Parse HH:MM to minutes since midnight. Returns None on failure."""
+    try:
+        parts = t.strip().split(":")
+        return int(parts[0]) * 60 + int(parts[1])
+    except (IndexError, ValueError):
+        return None
+
+
+def _load_schedule() -> dict:
+    """Read schedule from ROUTINE.md ## Schedule section. Falls back to defaults."""
+    global _checkin_schedule_cache, _checkin_schedule_cache_time
+    now = time.time()
+    if _checkin_schedule_cache and now - _checkin_schedule_cache_time < 60:
+        nora_logger.debug("[CHECKIN] Schedule: using cache (%.0fs old)", now - _checkin_schedule_cache_time)
+        return _checkin_schedule_cache
+
+    schedule = dict(_DEFAULT_SCHEDULE)
+    try:
+        routine_path = Path.home() / ".hermes" / "memories" / "ROUTINE.md"
+        if not routine_path.exists():
+            nora_logger.debug("[CHECKIN] Schedule: ROUTINE.md not found — using defaults")
+            return schedule
+        text = routine_path.read_text(encoding="utf-8")
+        in_schedule = False
+        parsed = []
+        for line in text.split("\n"):
+            stripped = line.strip()
+            if stripped == "## Schedule":
+                in_schedule = True
+                continue
+            if in_schedule:
+                if stripped.startswith("## "):
+                    break
+                if stripped.startswith("- "):
+                    entry = stripped[2:].strip()
+                    parsed.append(entry)
+                    if ": " in entry:
+                        key, val = entry.split(": ", 1)
+                        key = key.strip().lower()
+                        val = val.strip()
+                        if key == "weekday_sleep" and "-" in val:
+                            parts = val.split("-")
+                            s, e = _parse_time(parts[0]), _parse_time(parts[1])
+                            if s is not None and e is not None:
+                                schedule["weekday_sleep_start"] = s
+                                schedule["weekday_sleep_end"] = e
+                        elif key == "weekday_college" and "-" in val:
+                            parts = val.split("-")
+                            s, e = _parse_time(parts[0]), _parse_time(parts[1])
+                            if s is not None and e is not None:
+                                schedule["weekday_college_start"] = s
+                                schedule["weekday_college_end"] = e
+                        elif key == "weekend_sleep" and "-" in val:
+                            parts = val.split("-")
+                            s, e = _parse_time(parts[0]), _parse_time(parts[1])
+                            if s is not None and e is not None:
+                                schedule["weekend_sleep_start"] = s
+                                schedule["weekend_sleep_end"] = e
+        nora_logger.debug("[CHECKIN] Schedule: parsed entries=%s result=%s", parsed,
+                          {k: v for k, v in schedule.items() if k != "weekday_college_start" and k != "weekday_college_end"})
+    except Exception as e:
+        nora_logger.debug("[CHECKIN] Schedule: parse error: %s", e)
+
+    _checkin_schedule_cache = schedule
+    _checkin_schedule_cache_time = now
+    return schedule
+
+
+def _checkin_now_minutes() -> int:
+    now = datetime.now()
+    return now.hour * 60 + now.minute
+
+
+def _checkin_is_weekday() -> bool:
+    return datetime.now().weekday() < 5
+
+
+def _checkin_load_state(task_id: str) -> dict:
+    try:
+        if _CHECKIN_STATE_FILE.exists():
+            raw = _CHECKIN_STATE_FILE.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if isinstance(data, dict) and data.get("task_id") == task_id:
+                nora_logger.debug("[CHECKIN] Loaded state: phase=%s created_at=%s",
+                                  data.get("phase"), data.get("created_at", "none"))
+                return data
+    except Exception as e:
+        nora_logger.debug("[CHECKIN] State load error: %s", e)
+    nora_logger.debug("[CHECKIN] No existing state — fresh start")
+    return {"task_id": task_id, "phase": None, "message": None,
+            "reason": None, "context": None, "created_at": None,
+            "fallback_job_id": None}
+
+
+def _checkin_save_state(state: dict) -> None:
+    nora_logger.debug("[CHECKIN] Saving state: phase=%s msg_len=%d",
+                      state.get("phase"), len(state.get("message", "") or ""))
+    _CHECKIN_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = _CHECKIN_STATE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state, ensure_ascii=False, default=str), encoding="utf-8")
+    tmp.replace(_CHECKIN_STATE_FILE)
+    nora_logger.debug("[CHECKIN] State saved to %s", _CHECKIN_STATE_FILE)
+
+
+def _checkin_cleanup_state(task_id: str) -> None:
+    nora_logger.debug("[CHECKIN] Cleaning up state for task=%s", task_id[:8])
+    try:
+        if _CHECKIN_STATE_FILE.exists():
+            raw = _CHECKIN_STATE_FILE.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            if isinstance(data, dict) and data.get("task_id") == task_id:
+                _CHECKIN_STATE_FILE.unlink(missing_ok=True)
+                nora_logger.debug("[CHECKIN] State file removed")
+    except Exception as e:
+        nora_logger.debug("[CHECKIN] State cleanup (state): %s", e)
+    try:
+        if _CHECKIN_SIGNAL_FILE.exists():
+            _CHECKIN_SIGNAL_FILE.unlink(missing_ok=True)
+            nora_logger.debug("[CHECKIN] Signal file removed")
+    except Exception as e:
+        nora_logger.debug("[CHECKIN] State cleanup (signal): %s", e)
+
+
+def _in_interval(minutes: int, start: int, end: int) -> bool:
+    """True if minutes falls in [start, end). Handles overnight (start >= end) and same-day spans."""
+    if start >= end:
+        return minutes >= start or minutes < end
+    return start <= minutes < end
+
+def _check_sleep_schedule() -> tuple[bool, str | None]:
+    minutes = _checkin_now_minutes()
+    weekday = _checkin_is_weekday()
+    sched = _load_schedule()
+    if weekday:
+        if _in_interval(minutes, sched["weekday_sleep_start"], sched["weekday_sleep_end"]):
+            return True, "Vex is asleep (weekday schedule)"
+        if _in_interval(minutes, sched["weekday_college_start"], sched["weekday_college_end"]):
+            return True, "Vex is likely at college"
+    else:
+        if _in_interval(minutes, sched["weekend_sleep_start"], sched["weekend_sleep_end"]):
+            return True, "Vex is asleep (weekend schedule)"
+    return False, None
+
+
+def _check_cooldown() -> tuple[bool, str | None]:
+    try:
+        if _CHECKIN_STATE_FILE.exists():
+            raw = _CHECKIN_STATE_FILE.read_text(encoding="utf-8")
+            data = json.loads(raw)
+            created = data.get("created_at")
+            if created:
+                elapsed = time.time() - float(created)
+                nora_logger.debug("[CHECKIN] Cooldown check: elapsed=%.0fs cooldown=%ds",
+                                  elapsed, _CHECKIN_COOLDOWN_MINUTES * 60)
+                if elapsed < _CHECKIN_COOLDOWN_MINUTES * 60:
+                    remaining = int((_CHECKIN_COOLDOWN_MINUTES * 60 - elapsed) / 60)
+                    nora_logger.debug("[CHECKIN] Cooldown ACTIVE — %dm remaining", remaining)
+                    return True, f"Cooldown active — {remaining}m until next check-in"
+                nora_logger.debug("[CHECKIN] Cooldown EXPIRED")
+    except Exception as e:
+        nora_logger.debug("[CHECKIN] Cooldown check error: %s", e)
+    return False, None
+
+
+def _check_last_activity(session_db_path: str) -> tuple[bool, float | None, str | None]:
+    last_active = None
+    last_platform = None
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB(session_db_path)
+        sessions = db.search_sessions(limit=5)
+        for s in sessions:
+            active = s.get("last_active")
+            platform = s.get("source")
+            if active:
+                try:
+                    ts = float(active)
+                except (TypeError, ValueError):
+                    continue
+                if last_active is None or ts > last_active:
+                    last_active = ts
+                    last_platform = platform
+    except Exception:
+        pass
+    if last_active is not None:
+        elapsed_min = (time.time() - last_active) / 60
+        if elapsed_min < _CHECKIN_IDLE_MINUTES:
+            return True, elapsed_min, last_platform
+    return False, last_active, last_platform
+
+
+def _check_cli_alive() -> bool:
+    """Check if the CLI process is alive by looking for its PID file."""
+    pid_file = _CHECKIN_DIR / "cli.pid"
+    if not pid_file.exists():
+        nora_logger.debug("[CHECKIN] CLI: no PID file at %s", pid_file)
+        return False
+    try:
+        pid = int(pid_file.read_text(encoding="utf-8").strip())
+        if pid <= 0:
+            nora_logger.debug("[CHECKIN] CLI: invalid pid=%d", pid)
+            return False
+        os.kill(pid, 0)
+        nora_logger.debug("[CHECKIN] CLI: pid=%d alive", pid)
+        return True
+    except OSError:
+        nora_logger.debug("[CHECKIN] CLI: pid not alive")
+        return False
+    except (ValueError, TypeError) as e:
+        nora_logger.debug("[CHECKIN] CLI: PID parse error: %s", e)
+        return False
+
+
+def _schedule_fallback_job(message: str, job_id: str, check_signal: bool = True) -> str | None:
+    """Schedule a one-shot cron job to deliver check-in to Telegram if CLI doesn't respond.
+    
+    When check_signal=True (CLI path), the fallback first checks if the signal file was
+    consumed by the CLI process. When check_signal=False (Telegram path), it always delivers.
+    """
+    try:
+        from cron.jobs import create_job, compute_next_run
+        from datetime import timedelta
+        run_at = (datetime.now().astimezone() + timedelta(minutes=_CHECKIN_CLI_TIMEOUT_MINUTES)).isoformat()
+        schedule = {"kind": "once", "run_at": run_at, "display": run_at}
+        if check_signal:
+            prompt = (
+                "You are Nora. Send this check-in message to Vex. "
+                f"IMPORTANT: First check if {_CHECKIN_SIGNAL_FILE} still exists. "
+                "If it does NOT exist (was consumed by CLI), output nothing and stop. "
+                "If it DOES exist, output the message exactly as provided below. "
+                "Do NOT add any formatting, quotes, or explanations.\n\n"
+                f"MESSAGE:\n{message}"
+            )
+        else:
+            prompt = (
+                "You are Nora. Deliver this check-in message to Vex on Telegram. "
+                "Output ONLY the message text below, nothing else:\n\n"
+                f"{message}"
+            )
+        job = create_job(
+            prompt=prompt,
+            schedule=run_at,
+            name=f"checkin-fallback-{job_id[:8]}",
+            repeat=1,
+            deliver="telegram",
+            enabled_toolsets=["nora-minimal"],
+        )
+        return job.get("id")
+    except Exception as exc:
+        nora_logger.error("Failed to schedule fallback job: %s", exc)
+        return None
+
+
+def _cancel_fallback_job(fallback_job_id: str | None) -> None:
+    if not fallback_job_id:
+        return
+    try:
+        from cron.jobs import remove_job
+        remove_job(fallback_job_id)
+    except Exception:
+        pass
+
+
+def _build_checkin_context(session_db_path: str) -> dict:
+    context = {
+        "time": datetime.now().strftime("%A, %Y-%m-%d %H:%M"),
+        "routine": None,
+        "recent_memories": None,
+        "user_profile": None,
+        "recent_sessions": [],
+    }
+    try:
+        routine_path = Path.home() / ".hermes" / "memories" / "ROUTINE.md"
+        if routine_path.exists():
+            text = routine_path.read_text(encoding="utf-8")
+            context["routine"] = text
+            nora_logger.debug("[CHECKIN] Context: ROUTINE.md loaded (%d chars)", len(text))
+        else:
+            nora_logger.debug("[CHECKIN] Context: ROUTINE.md not found")
+    except Exception as e:
+        nora_logger.debug("[CHECKIN] Context: ROUTINE.md error: %s", e)
+    try:
+        user_path = Path.home() / ".hermes" / "memories" / "USER.md"
+        if user_path.exists():
+            text = user_path.read_text(encoding="utf-8")
+            context["user_profile"] = text
+            nora_logger.debug("[CHECKIN] Context: USER.md loaded (%d chars)", len(text))
+        else:
+            nora_logger.debug("[CHECKIN] Context: USER.md not found")
+    except Exception as e:
+        nora_logger.debug("[CHECKIN] Context: USER.md error: %s", e)
+    try:
+        memory_path = Path.home() / ".hermes" / "memories" / "MEMORY.md"
+        if memory_path.exists():
+            text = memory_path.read_text(encoding="utf-8")
+            lines = text.split("\n")
+            context["recent_memories"] = "\n".join(lines[-100:])
+            nora_logger.debug("[CHECKIN] Context: MEMORY.md loaded (%d lines, last 100)", len(lines))
+        else:
+            nora_logger.debug("[CHECKIN] Context: MEMORY.md not found")
+    except Exception as e:
+        nora_logger.debug("[CHECKIN] Context: MEMORY.md error: %s", e)
+    try:
+        from hermes_state import SessionDB
+        db = SessionDB(session_db_path)
+        sessions = db.search_sessions(limit=5)
+        nora_logger.debug("[CHECKIN] Context: found %d recent sessions", len(sessions))
+        recent = []
+        for s in sessions:
+            sid = s.get("id")
+            source = s.get("source", "unknown")
+            created = s.get("created_at", "")
+            msgs = db.get_messages_as_conversation(sid) if sid else []
+            last_content = ""
+            for m in reversed(msgs):
+                if m.get("role") == "assistant" and m.get("content"):
+                    last_content = m["content"][:500]
+                    break
+            recent.append({
+                "source": source,
+                "created_at": created,
+                "message_count": len(msgs),
+                "last_assistant_message_preview": last_content,
+            })
+            nora_logger.debug("[CHECKIN] Context: session %s source=%s msgs=%d", sid[:12] if sid else "?", source, len(msgs))
+        context["recent_sessions"] = recent
+    except Exception as e:
+        nora_logger.debug("[CHECKIN] Context: sessions error: %s", e)
+    return context
+
+
+def _validate_checkin_message(message: str) -> str | None:
+    if not message or not message.strip():
+        return "Message cannot be empty"
+    if len(message) > _CHECKIN_MAX_MSG_LENGTH:
+        return f"Message too long ({len(message)} chars, max {_CHECKIN_MAX_MSG_LENGTH})"
+    text = message.strip()
+    if "**" in text or "```" in text or text.startswith("#"):
+        return "Message contains formatting. Use plain text only."
+    if "\u2014" in text or "\u2013" in text:
+        return "Message contains em/en dashes. Use hyphens or commas instead."
+    return None
+
+
+def nora_checkin_handler(args: dict, **kw) -> str:
+    """Handle the nora_checkin sticky tool pipeline."""
+    task_id = kw.get("task_id", "default")
+    action = (args.get("action") or "start").strip().lower()
+    nora_logger.debug("[CHECKIN] TOOL CALLED action=%s task=%s", action, task_id[:8])
+
+    if action == "evaluate":
+        with _checkin_lock:
+            state = _checkin_load_state(task_id)
+            # Cancel any pending fallback from a previous run
+            _cancel_fallback_job(state.get("fallback_job_id"))
+            _checkin_cleanup_state(task_id)
+            state = _checkin_load_state(task_id)
+
+        # Only cooldown is enforced programmatically — everything else is model-driven
+        skip, reason = _check_cooldown()
+        if skip:
+            nora_logger.info("[CHECKIN] SKIP — %s", reason)
+            return json.dumps({
+                "success": True,
+                "skip": True,
+                "reason": reason,
+                "complete": True,
+            })
+
+        try:
+            from hermes_constants import get_hermes_home
+            db_path = str(get_hermes_home() / "state.db")
+        except Exception:
+            db_path = str(Path.home() / ".hermes" / "state.db")
+
+        context = _build_checkin_context(db_path)
+        sched = _load_schedule()
+        def fmt(t):
+            return f"{t // 60:02d}:{t % 60:02d}"
+        context["schedule"] = {
+            "weekday_sleep": f"{fmt(sched['weekday_sleep_start'])}-{fmt(sched['weekday_sleep_end'])}",
+            "weekday_college": f"{fmt(sched['weekday_college_start'])}-{fmt(sched['weekday_college_end'])}",
+            "weekend_sleep": f"{fmt(sched['weekend_sleep_start'])}-{fmt(sched['weekend_sleep_end'])}",
+        }
+
+        state["phase"] = "evaluated"
+        state["created_at"] = str(time.time())
+        state["context"] = context
+        with _checkin_lock:
+            _checkin_save_state(state)
+
+        platform_hint = "CLI" if _check_cli_alive() else "Telegram"
+        nora_logger.info("[CHECKIN] PROCEED — platform=%s", platform_hint)
+        return json.dumps({
+            "success": True,
+            "skip": False,
+            "complete": False,
+            "platform": platform_hint,
+            "context": context,
+            "prompt": (
+                "Here is Vex's current context — routine, memories, user profile, recent sessions, and current time. "
+                "Review it and decide: should you check in with him right now? "
+                "Consider what he's likely doing, how he's feeling, whether he'd appreciate a message.\n\n"
+                "If YES — first, plan what you'd talk about if he replies. "
+                "Have a direction ready: a follow-up thought, something to share, a thread you can continue. "
+                "Your message should open something you can actually carry forward — not a dead end.\n\n"
+                "Then write a message that's real and has substance. "
+                "Reference something specific: something from his routine, something you learned or remembered, "
+                "a genuine observation, a question you've been sitting on. "
+                "Make sure it's something you can naturally expand on if the conversation continues.\n\n"
+                "If NO — output [SILENT] and stop. Don't check in if he's busy, asleep, or it'd be intrusive.\n\n"
+                "Rules for the message if you proceed:\n"
+                "- 1-3 sentences. Short but substantive.\n"
+                "- No em-dashes, no formatting, plain text only.\n"
+                "- No therapy language, no AI filler, no 'how are you feeling?'\n"
+                "- No 'I'm here for you' platitudes.\n"
+                "- Be direct. Be real. Say something worth his time.\n"
+                "- If you reference a memory or fact, make sure it's accurate.\n\n"
+                "To proceed: call prepare with your message. To skip: output [SILENT]."
+            ),
+        })
+
+    if action == "prepare":
+        state = _checkin_load_state(task_id)
+        if state.get("phase") != "evaluated":
+            return json.dumps({
+                "success": False,
+                "error": "Must call evaluate first before prepare",
+                "hint": "Call evaluate first to check timing and get context",
+                "complete": False,
+            })
+
+        message = (args.get("message") or "").strip()
+        reason = (args.get("reason") or "").strip()
+        validation_error = _validate_checkin_message(message)
+        if validation_error:
+            nora_logger.warning("[CHECKIN] Validation failed: %s | msg=%.200s", validation_error, message)
+            return json.dumps({
+                "success": False,
+                "error": validation_error,
+                "hint": "Write a short, natural message in plain text",
+                "complete": False,
+            })
+
+        state["phase"] = "prepared"
+        state["message"] = message
+        state["reason"] = reason or "checking in"
+        with _checkin_lock:
+            _checkin_save_state(state)
+
+        nora_logger.info("[CHECKIN] PREPARED — msg=%.200s", message)
+        return json.dumps({
+            "success": True,
+            "complete": False,
+            "prompt": "Your check-in message is ready. Call deliver to send it.",
+        })
+
+    if action == "deliver":
+        state = _checkin_load_state(task_id)
+        if state.get("phase") != "prepared":
+            return json.dumps({
+                "success": False,
+                "error": "Must call prepare before deliver",
+                "hint": "Call prepare with your message first",
+                "complete": True,
+            })
+
+        message = state["message"]
+        reason = state["reason"]
+
+        cli_alive = _check_cli_alive()
+
+        try:
+            from hermes_constants import get_hermes_home
+            db_path = str(get_hermes_home() / "state.db")
+        except Exception:
+            db_path = str(Path.home() / ".hermes" / "state.db")
+
+        if cli_alive:
+            try:
+                from hermes_state import SessionDB
+                db = SessionDB(db_path)
+                sessions = db.search_sessions(limit=5)
+                target_session = None
+                for s in sessions:
+                    src = s.get("source", "")
+                    if src in ("cli", "terminal") or src.startswith("cli"):
+                        target_session = s
+                        break
+                if not target_session and sessions:
+                    target_session = sessions[0]
+
+                if target_session:
+                    sid = target_session["id"]
+                    db.append_message(session_id=sid, role="assistant", content=message)
+                    nora_logger.info("[CHECKIN] Appended to session %s", sid[:12])
+                    state["session_id"] = sid
+                else:
+                    nora_logger.warning("[CHECKIN] No suitable session found")
+            except Exception as exc:
+                nora_logger.error("[CHECKIN] Session append failed: %s", exc)
+
+            signal = {
+                "session_id": state.get("session_id", ""),
+                "message": message,
+                "reason": reason,
+                "timestamp": time.time(),
+                "consumed": False,
+            }
+            _CHECKIN_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = _CHECKIN_SIGNAL_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(signal, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_CHECKIN_SIGNAL_FILE)
+            nora_logger.info("[CHECKIN] Signal file written: %s", _CHECKIN_SIGNAL_FILE)
+
+            fallback_id = _schedule_fallback_job(message, task_id)
+            if fallback_id:
+                state["fallback_job_id"] = fallback_id
+                nora_logger.info("[CHECKIN] Fallback job scheduled: %s", fallback_id)
+
+            state["phase"] = "delivered"
+            state["delivery_method"] = "cli"
+            with _checkin_lock:
+                _checkin_save_state(state)
+
+            nora_logger.info("[CHECKIN] DELIVERED to CLI")
+            return json.dumps({
+                "success": True,
+                "complete": True,
+                "delivery": "cli",
+                "message": "Check-in delivered to terminal session",
+            })
+        else:
+            # Write signal file for record-keeping
+            signal = {
+                "session_id": state.get("session_id", ""),
+                "message": message,
+                "reason": reason,
+                "timestamp": time.time(),
+                "consumed": False,
+            }
+            _CHECKIN_DIR.mkdir(parents=True, exist_ok=True)
+            tmp = _CHECKIN_SIGNAL_FILE.with_suffix(".tmp")
+            tmp.write_text(json.dumps(signal, ensure_ascii=False), encoding="utf-8")
+            tmp.replace(_CHECKIN_SIGNAL_FILE)
+
+            # Schedule fallback job (always deliver — no signal check)
+            fallback_id = _schedule_fallback_job(message, task_id, check_signal=False)
+            if fallback_id:
+                state["fallback_job_id"] = fallback_id
+                nora_logger.info("[CHECKIN] Telegram fallback job scheduled: %s", fallback_id)
+
+            state["phase"] = "delivered"
+            state["delivery_method"] = "telegram"
+            state["message"] = message
+            with _checkin_lock:
+                _checkin_save_state(state)
+
+            nora_logger.info("[CHECKIN] Delivering via Telegram — signal+fallback ready")
+            return json.dumps({
+                "success": True,
+                "complete": True,
+                "delivery": "telegram",
+                "message": message,
+                "prompt": (
+                    "Deliver this check-in message to Vex on Telegram. "
+                    "Output ONLY the message text below, nothing else:\n\n"
+                    f"{message}"
+                ),
+            })
+
+    return json.dumps({
+        "success": False,
+        "error": f"Unknown action: {action}",
+        "hint": "Use evaluate, prepare, or deliver",
+        "complete": False,
+    })
+
+
+CHECKIN_SCHEMA = {
+    "name": "nora_checkin",
+    "description": (
+        "[STICKY] Proactive check-in pipeline. "
+        "Call evaluate to check timing and get context, prepare with your message, "
+        "then deliver to send it to Vex. "
+        "Use evaluate first — prepare and deliver only work after evaluate."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["evaluate", "prepare", "deliver"],
+                "description": (
+                    "evaluate=check timing and get context first. "
+                    "prepare=submit your check-in message. "
+                    "deliver=send the check-in to Vex."
+                ),
+            },
+            "message": {
+                "type": "string",
+                "description": "Your check-in message (required for prepare, plain text only, max 500 chars)",
+            },
+            "reason": {
+                "type": "string",
+                "description": "Why you're checking in (optional, for context)",
+            },
+        },
+        "required": ["action"],
+    },
+}
+
+
+# ---------------------------------------------------------------------------
 # Plugin registration
 # ---------------------------------------------------------------------------
 
@@ -2181,6 +2944,22 @@ def register(ctx: Any) -> None:
         schema=DEDUP_MEMORIES_SCHEMA,
         handler=nora_dedup_memories_handler,
         emoji="🔄",
+    )
+
+    # Register check-in pipeline tool (available in nora-minimal too for cron use)
+    ctx.register_tool(
+        name="nora_checkin",
+        toolset="nora-minimal",
+        schema=CHECKIN_SCHEMA,
+        handler=nora_checkin_handler,
+        emoji="💬",
+    )
+    ctx.register_tool(
+        name="nora_checkin",
+        toolset="nora-memory",
+        schema=CHECKIN_SCHEMA,
+        handler=nora_checkin_handler,
+        emoji="💬",
     )
 
     # Pre-load embedding model at startup so first query is fast

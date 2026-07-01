@@ -313,6 +313,22 @@ def setup_logging(
         formatter=RedactingFormatter(_LOG_FORMAT),
     )
 
+    # --- sticky.log (DEBUG+, sticky tool mode — always captured) ------------
+    # Sticky-mode logs can reveal why the agent got stuck, so this file is
+    # created unconditionally (even at INFO root level) so it's always
+    # available for debugging without requiring verbose mode.
+    _sticky_logger = logging.getLogger("sticky")
+    _sticky_logger.propagate = False
+    _sticky_logger.setLevel(logging.DEBUG)
+    _add_rotating_handler(
+        _sticky_logger,
+        log_dir / "sticky.log",
+        level=logging.DEBUG,
+        max_bytes=5 * 1024 * 1024,
+        backup_count=3,
+        formatter=RedactingFormatter(_LOG_FORMAT),
+    )
+
     # --- gateway.log (INFO+, gateway component only) ------------------------
     if mode == "gateway":
         _add_rotating_handler(

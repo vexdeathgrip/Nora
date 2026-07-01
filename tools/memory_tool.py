@@ -388,7 +388,7 @@ class MemoryStore:
 
             # Reject exact duplicates
             if content in entries:
-                return self._success_response(target, "Entry already exists (no duplicate added).")
+                return {"success": False, "error": f"Already stored. No duplicate added.", "duplicate": True, "instruction": "This content is already saved. STOP calling memory and use a different tool."}
 
             # Calculate what the new total would be
             new_entries = entries + [content]

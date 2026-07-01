@@ -266,6 +266,33 @@ def _validate_frontmatter(content: str) -> Optional[str]:
     return None
 
 
+def _validate_no_sub_skill(skill_dir: Path) -> Optional[str]:
+    """
+    Reject creating a new skill under an existing skill's directory tree.
+    
+    Walks up from the new skill's parent directory toward the skills root.
+    If any ancestor directory already has a SKILL.md, the new skill would
+    be a sub-skill of an existing one — which fragments guidance and
+    creates duplication.
+    
+    Agents must either edit the existing parent skill or create a new
+    top-level skill (or under a plain category directory that has no
+    SKILL.md of its own).
+    """
+    parent = skill_dir.parent
+    while parent != SKILLS_DIR:
+        if (parent / "SKILL.md").exists():
+            return (
+                f"Cannot create skill '{skill_dir.name}' under "
+                f"'{parent.name}' — '{parent.name}' is itself a skill. "
+                f"Sub-skills are not allowed. Either edit the existing "
+                f"'{parent.name}' skill with action='edit', or create a "
+                f"new top-level skill in {SKILLS_DIR}."
+            )
+        parent = parent.parent
+    return None
+
+
 def _validate_content_size(content: str, label: str = "SKILL.md") -> Optional[str]:
     """Check that content doesn't exceed the character limit for agent writes.
 
@@ -523,8 +550,13 @@ def _create_skill(name: str, content: str, category: str = None) -> Dict[str, An
             "error": f"A skill named '{name}' already exists at {existing['path']}."
         }
 
-    # Create the skill directory
+    # Enforce no sub-skills: reject creation under an existing skill's directory
     skill_dir = _resolve_skill_dir(name, category)
+    err = _validate_no_sub_skill(skill_dir)
+    if err:
+        return {"success": False, "error": err}
+
+    # Create the skill directory
     skill_dir.mkdir(parents=True, exist_ok=True)
 
     # Write SKILL.md atomically
@@ -954,6 +986,11 @@ SKILL_MANAGE_SCHEMA = {
         "patch (old_string/new_string — preferred for fixes), "
         "edit (full SKILL.md rewrite — major overhauls only), "
         "delete, write_file, remove_file.\n\n"
+        "IMPORTANT — Sub-skills are NOT allowed. Creating a skill under "
+        "an existing skill's directory (e.g. creating 'companion/foo' when "
+        "'companion/SKILL.md' exists) is rejected. Always update the "
+        "existing skill with action='edit' or create a new top-level skill "
+        "at the root of the skills directory.\n\n"
         "On delete, pass `absorbed_into=<umbrella>` when you're merging this "
         "skill's content into another one, or `absorbed_into=\"\"` when you're "
         "pruning it with no forwarding target. This lets the curator tell "
@@ -1023,7 +1060,11 @@ SKILL_MANAGE_SCHEMA = {
                 "description": (
                     "Optional category/domain for organizing the skill (e.g., 'devops', "
                     "'data-science', 'mlops'). Creates a subdirectory grouping. "
-                    "Only used with 'create'."
+                    "Only used with 'create'. The category directory itself must NOT "
+                    "have a SKILL.md file — categories are plain grouping directories, "
+                    "not parent skills. Creating a skill under a category that is itself "
+                    "a skill (e.g. 'companion/foo' when 'companion/SKILL.md' exists) "
+                    "will be rejected."
                 )
             },
             "file_path": {

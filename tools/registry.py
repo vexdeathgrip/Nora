@@ -15,6 +15,7 @@ Import chain (circular-import safe):
 """
 
 import ast
+import difflib
 import importlib
 import json
 import logging
@@ -81,11 +82,13 @@ class ToolEntry:
         "name", "toolset", "schema", "handler", "check_fn",
         "requires_env", "is_async", "description", "emoji",
         "max_result_size_chars", "dynamic_schema_overrides",
+        "sticky_config",
     )
 
     def __init__(self, name, toolset, schema, handler, check_fn,
                  requires_env, is_async, description, emoji,
-                 max_result_size_chars=None, dynamic_schema_overrides=None):
+                 max_result_size_chars=None, dynamic_schema_overrides=None,
+                 sticky_config=None):
         self.name = name
         self.toolset = toolset
         self.schema = schema
@@ -104,6 +107,7 @@ class ToolEntry:
         # on every get_definitions() call; results are merged shallow on top
         # of the base schema before the {"type": "function", ...} wrap.
         self.dynamic_schema_overrides = dynamic_schema_overrides
+        self.sticky_config = sticky_config or {}
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +248,7 @@ class ToolRegistry:
         emoji: str = "",
         max_result_size_chars: int | float | None = None,
         dynamic_schema_overrides: Callable = None,
+        sticky_config: dict = None,
         override: bool = False,
     ):
         """Register a tool.  Called at module-import time by each tool file.
@@ -299,6 +304,7 @@ class ToolRegistry:
                 emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
                 dynamic_schema_overrides=dynamic_schema_overrides,
+                sticky_config=sticky_config,
             )
             if check_fn and toolset not in self._toolset_checks:
                 self._toolset_checks[toolset] = check_fn
@@ -396,7 +402,11 @@ class ToolRegistry:
         """
         entry = self.get_entry(name)
         if not entry:
-            return json.dumps({"error": f"Unknown tool: {name}"})
+            close = difflib.get_close_matches(name, self._tools.keys(), n=3, cutoff=0.5)
+            msg = f"Unknown tool: {name}"
+            if close:
+                msg += f" Did you mean: {', '.join(close)}?"
+            return json.dumps({"error": msg})
         try:
             if entry.is_async:
                 from model_tools import _run_async

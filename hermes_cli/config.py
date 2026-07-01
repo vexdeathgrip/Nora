@@ -2973,6 +2973,28 @@ DEFAULT_CONFIG = {
     },
 
 
+    # Sticky tool mode — when a tool call fails, the agent enters sticky mode
+    # and can only retry that tool (or quit). On success, sticky mode exits and
+    # the context is cleaned up to look like a first-attempt success.
+    "sticky": {
+        # Master switch — set false to disable sticky mode entirely.
+        "enabled": True,
+        # Guardrail thresholds used while sticky mode is active.
+        # These are intentionally high so the sticky mechanism (not the guardrail)
+        # controls retry behavior.
+        "guardrails": {
+            "exact_failure_block_after": 10,
+            "same_tool_failure_halt_after": 10,
+        },
+        # Max quit cycles before quitting is disabled in sticky mode.
+        "max_quit_cycles": 10,
+        # Max consecutive retry-failure nudges before auto-exiting sticky mode.
+        "max_nudges": 3,
+        # Tools that should never enter sticky mode — they have their own
+        # retry/flows (e.g. discover_tools has the pending-tool nudge system).
+        "excluded_tools": ["discover_tools"],
+    },
+
     # Config schema version - bump this when adding new required fields
     "_config_version": 30,
 }

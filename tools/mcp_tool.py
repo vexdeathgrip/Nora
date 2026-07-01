@@ -4053,9 +4053,12 @@ def _discover_tools_handler(args: dict, **kw) -> str:
         "description": simplified_schema["description"],
         "parameters": simplified_schema["parameters"],
         "instruction": (
-            f"Tool '{full_name}' is now registered. Call it as a function "
-            f"with the parameters shown above. Do NOT run it as a terminal command."
-        ),
+                f"Tool '{full_name}' is now registered and ready to use. "
+                f"Call it directly: {full_name}({', '.join(simplified_schema.get('parameters', {}).get('properties', {}).keys())}) "
+                f"with the parameters shown above. Do NOT call discover_tools again — "
+                f"just call {full_name} like any other tool. "
+                f"Do NOT run it as a terminal command."
+            ),
         "hint": "If you change your mind, call discover_tools(action=\"quit\") to cancel.",
     }, indent=2)
 

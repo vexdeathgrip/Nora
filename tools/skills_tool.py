@@ -94,9 +94,13 @@ SKILLS_DIR = HERMES_HOME / "skills"
 def _import_skill_store():
     """Import skill_store from the vector-context plugin."""
     import importlib.util
+    import sys
     skill_store_path = HERMES_HOME / "plugins" / "vector-context" / "skill_store.py"
     if not skill_store_path.exists():
         return None
+    plugin_dir = str(skill_store_path.parent)
+    if plugin_dir not in sys.path:
+        sys.path.insert(0, plugin_dir)
     spec = importlib.util.spec_from_file_location("skill_store", skill_store_path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

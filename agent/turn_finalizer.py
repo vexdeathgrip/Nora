@@ -23,8 +23,25 @@ keep the exact logger name (``"agent.conversation_loop"``).
 from __future__ import annotations
 
 import os
+import re
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
+
+# Strip em dashes + horizontal rule/separator chars — Vex hates visual noise
+_EMDASH_RE = re.compile(r"[—–―]")
+_HLINE_RE = re.compile(r"[─━═▔▁▬▭▯╌╍╴╶╺╸]")
+
+# Common markdown/ascii separators: 3+ repeated chars on their own line
+_SEP_LINE_RE = re.compile(r"^[-_*=~]{3,}\s*$", re.MULTILINE)
+
+
+def _strip_emdash(text: str | None) -> str | None:
+    if text is None:
+        return None
+    text = _EMDASH_RE.sub("-", text)
+    text = _HLINE_RE.sub("", text)
+    text = _SEP_LINE_RE.sub("", text)
+    return text
 
 
 def finalize_turn(
@@ -49,6 +66,12 @@ def finalize_turn(
     loop). See module docstring.
     """
     from agent.conversation_loop import logger
+
+    # Strip em dashes from the final response and all assistant message content
+    final_response = _strip_emdash(final_response)  # type: ignore[assignment]
+    for _msg in messages:
+        if _msg.get("role") == "assistant" and _msg.get("content"):
+            _msg["content"] = _strip_emdash(_msg["content"])  # type: ignore[assignment]
 
     if final_response is None and (
         api_call_count >= agent.max_iterations

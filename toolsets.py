@@ -100,11 +100,20 @@ TOOLSETS = {
             "terminal", "process",
             "memory", "session_search", "vector_search",
             "skill_view", "skills_list", "skill_manage", "skill_search",
-            "execute_code", "clarify",
+            "execute_code",
             "delegate_task",
             "discover_tools",
             "self_update",
             "web_search",
+        ],
+        "includes": []
+    },
+    # Nora's check-in only toolset — no distractions, forces model to use
+    # the nora_checkin tool pipeline for proactive check-ins.
+    "nora-checkin": {
+        "description": "Nora's check-in-only toolset",
+        "tools": [
+            "nora_checkin",
         ],
         "includes": []
     },

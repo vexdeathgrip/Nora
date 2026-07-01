@@ -28,6 +28,7 @@ from typing import Any, Dict, Optional
 from hermes_cli.timeouts import get_provider_request_timeout, get_provider_stale_timeout
 from hermes_constants import PARTIAL_STREAM_STUB_ID, FINISH_REASON_LENGTH
 from agent.error_classifier import FailoverReason
+from agent.turn_finalizer import _strip_emdash
 from agent.model_metadata import is_local_endpoint
 from agent.message_sanitization import (
     _sanitize_surrogates,
@@ -1954,8 +1955,8 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                 # box is already closed (tool boundary flush).
                 elif agent.stream_delta_callback:
                     try:
-                        agent.stream_delta_callback(delta.content)
-                        agent._record_streamed_assistant_text(delta.content)
+                        agent.stream_delta_callback(_strip_emdash(delta.content))
+                        agent._record_streamed_assistant_text(_strip_emdash(delta.content))
                     except Exception:
                         pass
 

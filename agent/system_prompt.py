@@ -352,7 +352,9 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
             sys.path.insert(0, str(_get_hermes_home() / "plugins" / "todo-list"))
             from importlib import import_module
             todo_plugin = import_module("__init__")
-            todo_block = todo_plugin.get_todo_list_for_prompt()
+            todo_block = todo_plugin.get_todo_list_for_prompt(
+                session_id=getattr(agent, "session_id", None)
+            )
             if todo_block:
                 volatile_parts.append(todo_block)
         except Exception:

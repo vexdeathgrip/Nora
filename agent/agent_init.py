@@ -432,6 +432,17 @@ def init_agent(
     agent._tool_guardrails = ToolCallGuardrailController()
     agent._tool_guardrail_halt_decision: ToolGuardrailDecision | None = None
 
+    # Sticky tool mode state — managed by conversation_loop.py and tool_executor.py
+    agent._sticky_tool_name: Optional[str] = None       # Tool we're locked to, or None
+    agent._sticky_tool_quit_allowed: bool = True         # Per-tool quit permission (from sticky_config)
+    agent._sticky_tool_fail_count: int = 0               # Consecutive failures in sticky
+    agent._sticky_tool_quit_count: int = 0               # Times quit was used in this sticky session
+    agent._sticky_saved_tools: Optional[list] = None     # Snapshot of agent.tools before filter
+    agent._sticky_steer_text: Optional[str] = None       # Current sticky guidance text
+    agent._sticky_first_msg_idx: Optional[int] = None    # Index of first sticky assistant message
+    agent._sticky_empty_count: int = 0                   # Consecutive text-only responses in sticky
+    agent._sticky_nudge_count: int = 0                   # Consecutive user-nudge messages injected in sticky
+
     # Interrupt mechanism for breaking out of tool loops
     agent._interrupt_requested = False
     agent._interrupt_message = None  # Optional message that triggered interrupt

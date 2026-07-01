@@ -203,6 +203,27 @@ try:
 except Exception as e:
     logger.debug("Plugin discovery failed: %s", e)
 
+# ── Sticky-mode synthetic tool ────────────────────────────
+# _quit_tool is a zero-parameter tool that exits sticky mode.
+# It is injected by the sticky tool filter, not part of any toolset.
+def _quit_tool_handler(args: dict, **kw) -> str:
+    return json.dumps({"success": True, "message": "Exited sticky mode."})
+
+try:
+    registry.register(
+        name="_quit_tool",
+        toolset="_internal",
+        schema={
+            "name": "_quit_tool",
+            "description": "Exit sticky mode and return to normal tool calling.",
+            "parameters": {"type": "object", "properties": {}},
+        },
+        handler=_quit_tool_handler,
+        sticky_config={"quittable": True},
+    )
+except Exception:
+    pass
+
 
 # =============================================================================
 # Backward-compat constants  (built once after discovery)

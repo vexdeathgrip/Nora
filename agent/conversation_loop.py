@@ -28,7 +28,8 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
-from agent.display import KawaiiSpinner
+from agent.display import KawaiiSpinner, _detect_tool_failure
+from agent.tool_executor import _sticky_build_guidance, _sticky_cleanup_on_success
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.iteration_budget import IterationBudget
 from agent.turn_context import build_turn_context
@@ -289,6 +290,9 @@ def _restore_or_build_system_prompt(agent, system_message, conversation_history)
             "update_system_prompt write path.",
             agent.session_id, stored_state,
         )
+
+    # Tasks are now session-tagged in a global todo.json. The system prompt
+    # filters by session_id so each session only sees its own tasks. No clear needed.
 
     # First turn of a new session (or recovering from a broken stored
     # prompt) — build from scratch.
@@ -954,6 +958,54 @@ def run_conversation(
             logging.debug(f"Last message role: {messages[-1]['role'] if messages else 'none'}")
             logging.debug(f"Total message size: ~{approx_tokens:,} tokens")
         
+        # ── Sticky mode: filter available tools ──────────────────────
+        # When locked to a specific tool, only expose the stuck tool and
+        # _quit_tool. discover_tools is deliberately excluded — it has its
+        # own multi-step flow (pending tool nudge system in _mcp_bridge.py)
+        # and wrapping it in sticky mode causes an infinite discovery loop.
+        if agent._sticky_tool_name is not None:
+            logging.getLogger("sticky").debug("sticky: filtering tools — locked=%s, quit_allowed=%s, quit_count=%d",
+                         agent._sticky_tool_name, agent._sticky_tool_quit_allowed, agent._sticky_tool_quit_count)
+            if agent._sticky_saved_tools is None:
+                agent._sticky_saved_tools = agent.tools
+                logging.getLogger("sticky").debug("sticky: saved original tools (%d entries)", len(agent._sticky_saved_tools) if agent._sticky_saved_tools else 0)
+            from tools.registry import registry as _sticky_registry
+            from hermes_cli.config import load_config, cfg_get
+            _sticky_cfg = cfg_get(load_config(), "sticky", default={})
+            _sticky_max_q = (cfg_get(_sticky_cfg, "max_quit_cycles") or 10)
+            _sticky_quittable = (
+                agent._sticky_tool_quit_allowed
+                and agent._sticky_tool_quit_count < _sticky_max_q
+            )
+            _allowed_sticky = {agent._sticky_tool_name}
+            if _sticky_quittable:
+                _allowed_sticky.add("_quit_tool")
+            _filtered = [
+                t for t in (agent.tools or [])
+                if isinstance(t, dict) and t.get("function", {}).get("name") in _allowed_sticky
+            ]
+            # Inject _quit_tool if not already present
+            _sticky_inject_targets = []
+            if _sticky_quittable:
+                _sticky_inject_targets.append("_quit_tool")
+            for _needed in _sticky_inject_targets:
+                if not any(
+                    isinstance(t, dict) and t.get("function", {}).get("name") == _needed
+                    for t in _filtered
+                ):
+                    _entry = _sticky_registry.get_entry(_needed)
+                    if _entry:
+                        _filtered.append({
+                            "type": "function",
+                            "function": {
+                                "name": _needed,
+                                "description": getattr(_entry, "description", "") or f"Access the {_needed} tool.",
+                                "parameters": _entry.schema.get("parameters", {"type": "object", "properties": {}}),
+                            }
+                        })
+            agent.tools = _filtered
+            logging.getLogger("sticky").debug("sticky: filtered tools → %s", [t.get("function", {}).get("name") for t in _filtered])
+
         api_start_time = time.time()
         retry_count = 0
         max_retries = agent._api_max_retries
@@ -3882,6 +3934,136 @@ def run_conversation(
 
                 agent._execute_tool_calls(assistant_message, messages, effective_task_id, api_call_count)
 
+                # ── Sticky mode: state machine ────────────────────────
+                _sticky_nudge_auto_exit = False
+                _tool_names_executed = {tc.function.name for tc in assistant_message.tool_calls}
+                if agent._sticky_tool_name is not None:
+                    _stuck = agent._sticky_tool_name
+                    if _stuck in _tool_names_executed:
+                        for _si in range(len(messages) - 1, -1, -1):
+                            _sm = messages[_si]
+                            if isinstance(_sm, dict) and _sm.get("role") == "tool" and _sm.get("name") == _stuck:
+                                _failed, _ = _detect_tool_failure(_stuck, _sm.get("content"))
+                                if _failed:
+                                    agent._sticky_tool_fail_count += 1
+                                    agent._sticky_nudge_count += 1
+                                    logging.getLogger("sticky").debug("sticky: retry fail — tool=%s, attempt=%d, nudge=%d, quit_count=%d",
+                                                 _stuck, agent._sticky_tool_fail_count, agent._sticky_nudge_count, agent._sticky_tool_quit_count)
+                                    _guidance = _sticky_build_guidance(agent, _stuck)
+                                    _cur = _sm.get("content") or ""
+                                    _sm["content"] = _cur + _guidance
+                                    from hermes_cli.config import load_config, cfg_get
+                                    _sticky_cfg = cfg_get(load_config(), "sticky", default={})
+                                    _max_q = (cfg_get(_sticky_cfg, "max_quit_cycles") or 10)
+                                    _max_nudges = cfg_get(_sticky_cfg, "max_nudges", default=3)
+                                    _quit_available = (
+                                        agent._sticky_tool_quit_allowed
+                                        and agent._sticky_tool_quit_count < _max_q
+                                    )
+                                    _nudge = (
+                                        f"[STICKY] `{_stuck}` failed (attempt {agent._sticky_tool_fail_count}). "
+                                        f"Fix the error and retry."
+                                        + (f" Call `_quit_tool` to exit ({_max_q - agent._sticky_tool_quit_count} remaining)." if _quit_available else " Quitting exhausted.")
+                                        + f" Call `{_stuck}` now."
+                                    )
+                                    messages.append({"role": "user", "content": _nudge})
+                                    agent._emit_status(
+                                        f"🔄 Sticky: {_stuck} attempt {agent._sticky_tool_fail_count}"
+                                    )
+                                    if agent._sticky_nudge_count >= _max_nudges:
+                                        logging.getLogger("sticky").debug(
+                                            "sticky: nudge threshold reached — tool=%s, nudges=%d, auto-exiting",
+                                            _stuck, agent._sticky_nudge_count
+                                        )
+                                        _nudge_total = agent._sticky_nudge_count
+                                        agent._sticky_tool_name = None
+                                        agent._sticky_tool_fail_count = 0
+                                        agent._sticky_nudge_count = 0
+                                        agent._sticky_tool_quit_count = 0
+                                        agent._sticky_tool_quit_allowed = True
+                                        agent._sticky_first_msg_idx = None
+                                        agent._sticky_steer_text = None
+                                        agent._sticky_empty_count = 0
+                                        if agent._sticky_saved_tools is not None:
+                                            agent.tools = agent._sticky_saved_tools
+                                            agent._sticky_saved_tools = None
+                                        _sticky_nudge_auto_exit = True
+                                        agent._emit_status(f"🛑 Sticky auto-exit: {_stuck} {_nudge_total} nudges exhausted")
+                                else:
+                                    logging.getLogger("sticky").debug("sticky: success — tool=%s, clearing sticky state, msgs before=%d",
+                                                 _stuck, len(messages))
+                                    _sticky_cleanup_on_success(agent, messages)
+                                    logging.getLogger("sticky").debug("sticky: success — msgs after cleanup=%d", len(messages))
+                                    agent._emit_status(f"✅ Sticky: {_stuck} succeeded")
+                                break
+                    elif "_quit_tool" in _tool_names_executed:
+                        logging.getLogger("sticky").debug("sticky: quit — tool=%s, quit_count now=%d", _stuck, agent._sticky_tool_quit_count + 1)
+                        agent._sticky_tool_name = None
+                        agent._sticky_tool_fail_count = 0
+                        agent._sticky_nudge_count = 0
+                        agent._sticky_tool_quit_count += 1
+                        agent._sticky_tool_quit_allowed = True
+                        agent._sticky_first_msg_idx = None
+                        agent._sticky_empty_count = 0
+                        if agent._sticky_saved_tools is not None:
+                            agent.tools = agent._sticky_saved_tools
+                            agent._sticky_saved_tools = None
+                            logging.getLogger("sticky").debug("sticky: quit — restored %d tools", len(agent.tools) if agent.tools else 0)
+                        agent._emit_status(f"🛑 Quit sticky mode for {_stuck}")
+                elif _tool_names_executed:
+                    for _called in _tool_names_executed:
+                        for _si in range(len(messages) - 1, -1, -1):
+                            _sm = messages[_si]
+                            if isinstance(_sm, dict) and _sm.get("role") == "tool" and _sm.get("name") == _called:
+                                _failed, _ = _detect_tool_failure(_called, _sm.get("content"))
+                                from hermes_cli.config import load_config, cfg_get
+                                _sticky_excluded = set(
+                                    cfg_get(load_config(), "sticky", "excluded_tools", default=[])
+                                )
+                                _sticky_skip = False
+                                if _failed and _sm.get("content"):
+                                    try:
+                                        _dup_data = json.loads(_sm["content"])
+                                        if isinstance(_dup_data, dict) and _dup_data.get("duplicate"):
+                                            _sticky_skip = True
+                                    except Exception:
+                                        pass
+                                if _failed and _called not in _sticky_excluded and not _sticky_skip:
+                                    for _ai in range(len(messages) - 1, -1, -1):
+                                        if isinstance(messages[_ai], dict) and messages[_ai].get("role") == "assistant" and messages[_ai].get("tool_calls"):
+                                            for _tc in messages[_ai]["tool_calls"]:
+                                                if (hasattr(_tc, "function") and _tc.function.name == _called) or (isinstance(_tc, dict) and _tc.get("function", {}).get("name") == _called):
+                                                    agent._sticky_first_msg_idx = _ai
+                                                    break
+                                            if agent._sticky_first_msg_idx is not None:
+                                                break
+                                    from tools.registry import registry as _sticky_registry
+                                    _sticky_entry = _sticky_registry.get_entry(_called)
+                                    _sticky_cfg_quittable = bool(
+                                        getattr(_sticky_entry, "sticky_config", {}).get("quittable", True)
+                                    )
+                                    agent._sticky_tool_quit_allowed = _sticky_cfg_quittable
+                                    agent._sticky_tool_name = _called
+                                    agent._sticky_tool_fail_count = 1
+                                    logging.getLogger("sticky").debug("sticky: entered — tool=%s, first_msg_idx=%d, quittable=%s, saved_tools_count=%d",
+                                                 _called, agent._sticky_first_msg_idx, _sticky_cfg_quittable,
+                                                 len(agent._sticky_saved_tools) if agent._sticky_saved_tools else 0)
+                                    _guidance = _sticky_build_guidance(agent, _called)
+                                    _cur = _sm.get("content") or ""
+                                    _sm["content"] = _cur + _guidance
+                                    agent._emit_status(f"🔒 Sticky entered: {_called}")
+                                    agent._persist_session(messages, conversation_history)
+                                # Always break after finding the most recent tool result
+                                # for this tool — don't search older messages for the same
+                                # tool, which could be stale errors from a previous sticky
+                                # cycle that trigger a re-entry.
+                                break
+                        if agent._sticky_tool_name is not None:
+                            break
+
+                if _sticky_nudge_auto_exit:
+                    continue
+
                 # Auto-clear pending MCP tool after successful execution
                 # Keep tool available for 2-3 calls before removing
                 try:
@@ -3896,31 +4078,36 @@ def run_conversation(
                 except ImportError:
                     pass
 
+                # Skip guardrail halt when sticky mode is active — sticky
+                # replaces the guardrail's role entirely.
                 if agent._tool_guardrail_halt_decision is not None:
-                    decision = agent._tool_guardrail_halt_decision
-                    _halt_nudge = agent._toolguard_controlled_halt_response(decision)
-                    agent._emit_status(
-                        f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
-                    )
+                    if agent._sticky_tool_name is not None:
+                        logging.getLogger("sticky").debug("sticky: guardrail halt bypassed for %s", agent._tool_guardrail_halt_decision.tool_name)
+                    else:
+                        decision = agent._tool_guardrail_halt_decision
+                        _halt_nudge = agent._toolguard_controlled_halt_response(decision)
+                        agent._emit_status(
+                            f"⚠️ Tool guardrail halted {decision.tool_name}: {decision.code}"
+                        )
 
-                    # After 5 halts on the same tool, remove it from agent.tools entirely
-                    _halt_count = agent._tool_guardrails._halt_counts_by_tool.get(decision.tool_name, 0)
-                    if _halt_count >= 5 and agent.tools is not None:
-                        _before = len(agent.tools)
-                        agent.tools[:] = [
-                            t for t in agent.tools
-                            if not (isinstance(t, dict)
-                                    and t.get("function", {}).get("name") == decision.tool_name)
-                        ]
-                        _after = len(agent.tools)
-                        if _before != _after:
-                            agent._emit_status(
-                                f"🗑️ Removed {decision.tool_name} from available tools after {_halt_count} halts"
-                            )
-                            _halt_nudge += (
-                                f"\n\nNOTE: {decision.tool_name} has been REMOVED from your available tools. "
-                                "You can no longer call it. Use a DIFFERENT tool."
-                            )
+                        # After 5 halts on the same tool, remove it from agent.tools entirely
+                        _halt_count = agent._tool_guardrails._halt_counts_by_tool.get(decision.tool_name, 0)
+                        if _halt_count >= 5 and agent.tools is not None:
+                            _before = len(agent.tools)
+                            agent.tools[:] = [
+                                t for t in agent.tools
+                                if not (isinstance(t, dict)
+                                        and t.get("function", {}).get("name") == decision.tool_name)
+                            ]
+                            _after = len(agent.tools)
+                            if _before != _after:
+                                agent._emit_status(
+                                    f"🗑️ Removed {decision.tool_name} from available tools after {_halt_count} halts"
+                                )
+                                _halt_nudge += (
+                                    f"\n\nNOTE: {decision.tool_name} has been REMOVED from your available tools. "
+                                    "You can no longer call it. Use a DIFFERENT tool."
+                                )
 
                     # Inject the nudge as a user message so the model MUST respond.
                     # DO NOT break the loop — let the model try a different tool.
@@ -4036,7 +4223,48 @@ def run_conversation(
                             continue
                 except ImportError:
                     pass
-                
+
+                # ── Sticky mode: text-only response without tool calls ──
+                if agent._sticky_tool_name is not None:
+                    _stuck_name = agent._sticky_tool_name
+                    _sticky_empty = getattr(agent, "_sticky_empty_count", 0)
+                    agent._sticky_empty_count = _sticky_empty + 1
+                    if agent._sticky_empty_count >= 3:
+                        # After 3 empty responses, force-quit sticky mode
+                        # The model didn't actively quit, so don't count this as a quit cycle.
+                        logging.getLogger("sticky").debug("sticky: text-only auto-exit — tool=%s, empty_count=%d", _stuck_name, agent._sticky_empty_count)
+                        agent._emit_status(f"🛑 Sticky auto-exit: {_sticky_empty+1} text-only responses")
+                        agent._sticky_tool_name = None
+                        agent._sticky_tool_fail_count = 0
+                        agent._sticky_nudge_count = 0
+                        agent._sticky_empty_count = 0
+                        agent._sticky_tool_quit_count = 0
+                        agent._sticky_tool_quit_allowed = True
+                        agent._sticky_first_msg_idx = None
+                        agent._sticky_steer_text = None
+                        if agent._sticky_saved_tools is not None:
+                            agent.tools = agent._sticky_saved_tools
+                            agent._sticky_saved_tools = None
+                    else:
+                        agent._emit_status(f"💬 Sticky: model returned text instead of calling {_stuck_name}")
+                        logging.getLogger("sticky").debug("sticky: text-only nudge %d/3 — tool=%s", agent._sticky_empty_count, _stuck_name)
+                        from hermes_cli.config import load_config, cfg_get
+                        _sticky_cfg = cfg_get(load_config(), "sticky", default={})
+                        _max_q = (cfg_get(_sticky_cfg, "max_quit_cycles") or 10)
+                        _quit_available = (
+                            agent._sticky_tool_quit_allowed
+                            and agent._sticky_tool_quit_count < _max_q
+                        )
+                        _nudge = (
+                            f"[STICKY MODE] You did not call `{_stuck_name}`. "
+                            f"You are locked to this tool until it succeeds."
+                            + (f" Call `_quit_tool` to exit or " if _quit_available else " ")
+                            + f"Call `{_stuck_name}` with corrected arguments. "
+                            "Do NOT explain — call the tool."
+                        )
+                        messages.append({"role": "user", "content": _nudge})
+                        continue
+
                 # No tool calls - this is the final response
                 final_response = assistant_message.content or ""
                 

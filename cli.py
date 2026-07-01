@@ -1048,6 +1048,13 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
     except Exception as e:
         logger.warning("CLI cleanup memory shutdown failed: %s", e, exc_info=True)
 
+    # Clean up CLI PID file so nora_checkin knows the terminal is gone
+    try:
+        _pid_file = Path.home() / ".hermes" / "cron" / "cli.pid"
+        _pid_file.unlink(missing_ok=True)
+    except Exception:
+        pass
+
 
 def _should_emit_cleanup_session_finalize(session_id: str | None) -> bool:
     if not _single_query_finalize_attempted_session_ids:
@@ -14488,6 +14495,42 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                                     self._pending_input.put(_synth)
                             except Exception:
                                 pass
+
+                            # Check for pending check-in signal from nora_checkin
+                            try:
+                                _checkin_signal = Path.home() / ".hermes" / "cron" / "checkin-pending.json"
+                                if _checkin_signal.exists():
+                                    _raw = _checkin_signal.read_text(encoding="utf-8")
+                                    _sig = json.loads(_raw)
+                                    _ts = _sig.get("timestamp", 0)
+                                    _age = time.time() - float(_ts)
+                                    if _age < 300 and not _sig.get("consumed"):  # < 5 min
+                                        # Mark consumed immediately to prevent re-read
+                                        _sig["consumed"] = True
+                                        _checkin_signal.write_text(
+                                            json.dumps(_sig, ensure_ascii=False), encoding="utf-8"
+                                        )
+                                        _msg = _sig.get("message", "")
+                                        _sid = _sig.get("session_id", "")
+                                        if _msg and _sid:
+                                            # Load session from DB and display
+                                            try:
+                                                from hermes_state import SessionDB
+                                                from hermes_constants import get_hermes_home
+                                                _sdb = SessionDB(str(get_hermes_home() / "state.db"))
+                                                _msgs = _sdb.get_messages_as_conversation(_sid)
+                                                if _msgs:
+                                                    self.conversation_history = _msgs
+                                                    self.session_id = _sid
+                                                    self._session_loaded = True
+                                                    # Display Nora's check-in message
+                                                    _cprint(f"\n  {_msg}")
+                                                    _cprint(f"  {_DIM}───{_RST}")
+                                            except Exception:
+                                                pass
+                                        _checkin_signal.unlink(missing_ok=True)
+                            except Exception:
+                                pass
                         continue
                     
                     if not user_input:
@@ -14826,6 +14869,16 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin):
                 _mark_tui_input_modes_active()
                 # Drive the petdex mascot animation (no-op when no pet enabled).
                 self._pet_start_anim()
+
+                # Write CLI PID so nora_checkin can detect this process
+                try:
+                    _checkin_dir = Path.home() / ".hermes" / "cron"
+                    _checkin_dir.mkdir(parents=True, exist_ok=True)
+                    _pid_file = _checkin_dir / "cli.pid"
+                    _pid_file.write_text(str(os.getpid()), encoding="utf-8")
+                except Exception:
+                    pass
+
                 app.run()
         except (EOFError, KeyboardInterrupt, BrokenPipeError):
             pass
