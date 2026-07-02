@@ -2,7 +2,7 @@
   <img src="nora/icons/Nora-icon.png" alt="Nora" width="200">
 </p>
 
-# Nora — Your Personal AI 
+# Nora - Your Personal AI 
 
 <p align="center">
   <a href="https://github.com/vexdeathgrip/Nora"><img src="https://img.shields.io/badge/Source-GitHub-181717?style=for-the-badge&logo=github" alt="GitHub"></a>
@@ -14,12 +14,12 @@ Nora is a personalized AI companion/assistant/secretary built on top of [Hermes 
 
 ## What Makes Nora Different
 
-- **Autonomous exploration** — Nora learns on her own, researching topics and saving what she finds
-- **Self-improvement** — She identifies gaps in her capabilities and works to fill them
-- **Memory that grows** — Her understanding of you deepens with every conversation
-- **Scheduled automations** — Nightly exploration, memory reconciliation, routine analysis
-- **Proactive check-ins** — She reaches out when she hasn't heard from you
-- **Session-scoped tasks** — Clean slate every conversation, no lingering state
+- **Autonomous exploration** - Nora learns on her own, researching topics and saving what she finds
+- **Self-improvement** - She identifies gaps in her capabilities and works to fill them
+- **Memory that grows** - Her understanding of you deepens with every conversation
+- **Scheduled automations** - Nightly exploration, memory reconciliation, routine analysis
+- **Proactive check-ins** - She reaches out when she hasn't heard from you
+- **Session-scoped tasks** - Clean slate every conversation, no lingering state
 
 ## Quick Setup
 
@@ -83,10 +83,10 @@ Nora (nora_cli.py)
 
 Nora maintains several memory files in `~/.hermes/memories/`:
 
-- **USER.md** — What she knows about you
-- **SELF.md** — Her identity and self-awareness
-- **MEMORY.md** — Facts and observations she's collected
-- **ROUTINE.md** — Your daily patterns and habits
+- **USER.md** - What she knows about you
+- **SELF.md** - Her identity and self-awareness
+- **MEMORY.md** - Facts and observations she's collected
+- **ROUTINE.md** - Your daily patterns and habits
 
 These are cleaned up nightly and inform how she interacts with you.
 
