@@ -2,7 +2,7 @@
   <img src="nora/icons/Nora-icon.png" alt="Nora" width="200">
 </p>
 
-# Nora — Your Personal AI Companion
+# Nora — Your Personal AI 
 
 <p align="center">
   <a href="https://github.com/vexdeathgrip/Nora"><img src="https://img.shields.io/badge/Source-GitHub-181717?style=for-the-badge&logo=github" alt="GitHub"></a>
@@ -10,7 +10,7 @@
   <a href="https://nousresearch.com"><img src="https://img.shields.io/badge/Built%20on-Hermes%20Agent-blueviolet?style=for-the-badge" alt="Built on Hermes Agent"></a>
 </p>
 
-Nora is a personalized AI companion built on top of [Hermes Agent](https://github.com/NousResearch/hermes-agent). She learns about you over time, explores the world autonomously, and builds a deepening model of who you are across sessions.
+Nora is a personalized AI companion/assistant/secretary built on top of [Hermes Agent](https://github.com/NousResearch/hermes-agent). She learns about you over time, explores the world autonomously, and builds a deepening model of who you are across sessions while also keeping track of your life, your schedules, while also improving herself and living autonomously. 
 
 ## What Makes Nora Different
 
